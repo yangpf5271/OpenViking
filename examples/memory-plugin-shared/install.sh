@@ -9,6 +9,9 @@
 #   bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shared/install.sh) --dist tos
 # Non-interactive:
 #   bash install.sh --harness claude,codex,cursor,trae,trae-cn,trae-cli,zcode,opencode,pi,dsh --dist github --lang en --url http://127.0.0.1:1933
+# Windows (Git Bash) — ZCode Desktop only; run from a checkout, scripts settle
+# into ~/.openviking/agent-integrations and the checkout is free to move after:
+#   bash install.sh --harness zcode --source dev --yes
 # Format-compatible CLI aliases:
 #   bash install.sh --harness trae-cli
 #   bash install.sh --harness claude --claude-bin claude,seed
@@ -39,7 +42,8 @@
 # ~/.claude/settings.json. That path needs a local copy of the plugin, so it
 # fetches the source even in remote mode.
 #
-# Targets bash 3.2+ (macOS /bin/bash) and Linux.
+# Targets bash 3.2+ (macOS /bin/bash) and Linux; on Windows only the zcode
+# harness is supported, via Git Bash.
 
 set -Eeuo pipefail
 
@@ -143,6 +147,42 @@ trap 'report_unexpected_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 # `grep -q`: with pipefail, grep exiting early SIGPIPEs the producer and the
 # pipeline reads as a miss even though the entry is there.
 str_contains() { case "$1" in *"$2"*) return 0 ;; *) return 1 ;; esac; }
+
+# Windows (Git Bash / MSYS) support. Only the zcode harness is validated there:
+# ZCode Desktop spawns hook and MCP commands directly (no shell), so paths
+# embedded into its config must be native and hooks must use the structured
+# {type:"process", command, args} shape instead of shell command strings.
+OV_NATIVE=0
+CYGPATH_BIN=""
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) OV_NATIVE=1; CYGPATH_BIN="$(command -v cygpath 2>/dev/null || true)" ;;
+esac
+
+# native_path <path> — Windows mixed form (C:/Users/...) under MSYS; no-op elsewhere.
+# Mixed form keeps forward slashes, so path markers like scripts/session-start.mjs
+# stay greppable and node accepts the value unchanged.
+native_path() {
+  if [ -n "$CYGPATH_BIN" ]; then
+    cygpath -m -- "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# native_node_bin — $NODE_BIN in native form, with the .exe MSYS strips off.
+native_node_bin() {
+  local p
+  p="$(native_path "$NODE_BIN")"
+  case "$p" in
+    *.exe) ;;
+    *)
+      if [ -f "${p}.exe" ]; then
+        p="${p}.exe"
+      fi
+      ;;
+  esac
+  printf '%s' "$p"
+}
 
 usage() {
   cat <<EOF
@@ -2026,12 +2066,19 @@ assemble_agent_integration() { # assemble_agent_integration <source-subdir> <des
   printf '%s' "$root"
 }
 
-agent_write_json_configs() { # agent_write_json_configs <kind> <hooks> <mcp> <root> <client-id> <node-bin>
+agent_write_json_configs() { # agent_write_json_configs <kind> <hooks> <mcp> <root> <client-id> <node-bin> [hook-style]
   local kind="$1" hooks_path="$2" mcp_path="$3" root="$4" client_id="$5" node_bin="$6"
-  "$NODE_BIN" - "$kind" "$hooks_path" "$mcp_path" "$root" "$client_id" "$node_bin" "$SOURCE_MODE" <<'NODE'
+  "$NODE_BIN" - "$kind" "$hooks_path" "$mcp_path" "$root" "$client_id" "$node_bin" "$SOURCE_MODE" "${7:-shell}" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
-const [kind, hooksPath, mcpPath, root, clientId, nodeBin, sourceMode] = process.argv.slice(2);
+const [kind, hooksPath, mcpPath, root, clientId, nodeBin, sourceMode, hookStyle] = process.argv.slice(2);
+
+// Join under root keeping forward slashes: on Windows path.join would mix
+// separators into embedded config values (C:/a\b\c), which breaks the
+// scripts/session-start.mjs markers that validation and uninstall grep for.
+function joinRoot(rel) {
+  return `${String(root).replace(/[\\/]+$/u, "")}/${String(rel).replace(/^\.?\//u, "")}`;
+}
 
 function readJson(file) {
   if (!fs.existsSync(file)) return {};
@@ -2097,24 +2144,42 @@ function renderHookCommand(command) {
   let rendered = command;
   const cursorMatch = /^node\s+\$\{CURSOR_PLUGIN_ROOT\}\/(.+)$/u.exec(rendered);
   if (cursorMatch) {
-    rendered = `${shellArg(nodeBin)} ${shellArg(path.join(root, cursorMatch[1]))}`;
+    rendered = `${shellArg(nodeBin)} ${shellArg(joinRoot(cursorMatch[1]))}`;
   } else {
     const pluginRootMatch = /^node\s+"?\$\{(?:CLAUDE_PLUGIN_ROOT|ZCODE_PLUGIN_ROOT)\}"?\/(.+?)"?$/u.exec(rendered);
     if (pluginRootMatch) {
-      rendered = `${shellArg(nodeBin)} ${shellArg(path.join(root, pluginRootMatch[1]))}`;
+      rendered = `${shellArg(nodeBin)} ${shellArg(joinRoot(pluginRootMatch[1]))}`;
     } else {
       const traeMatch = /^node\s+__OPENVIKING_TRAE_ROOT__\/(\S+)\s+(.+)$/u.exec(rendered);
       if (!traeMatch) throw new Error(`Unsupported ${clientId} hook command template: ${command}`);
-      rendered = `${shellArg(nodeBin)} ${shellArg(path.join(root, traeMatch[1]))} ${traeMatch[2]
+      rendered = `${shellArg(nodeBin)} ${shellArg(joinRoot(traeMatch[1]))} ${traeMatch[2]
         .replaceAll("__OPENVIKING_CLIENT_ID__", clientId)}`;
     }
   }
   return `${envPrefix} ${rendered} # openviking-memory`;
 }
 
+// Windows clients (ZCode Desktop) spawn hook commands directly instead of via a
+// shell: emit the structured shape with native absolute paths. The env block is
+// what later merge/uninstall passes (and re-runs) use to recognize our entries.
+function renderProcessHook(hook) {
+  const match = /^node\s+"?\$\{ZCODE_PLUGIN_ROOT\}"?\/(.+?)"?$/u.exec(hook.command);
+  if (!match) throw new Error(`Unsupported ${clientId} process hook command template: ${hook.command}`);
+  return {
+    type: "process",
+    command: nodeBin,
+    args: [joinRoot(match[1])],
+    timeoutMs: Math.round((Number(hook.timeout) || 30) * 1000),
+    env: { ...integrationEnv },
+  };
+}
+
 function renderHookValue(value) {
   if (Array.isArray(value)) return value.map(renderHookValue);
   if (!value || typeof value !== "object") return value;
+  if (hookStyle === "process" && typeof value.command === "string") {
+    return renderProcessHook(value);
+  }
   return Object.fromEntries(Object.entries(value).map(([key, child]) => [
     key,
     key === "command" && typeof child === "string" ? renderHookCommand(child) : renderHookValue(child),
@@ -2178,7 +2243,7 @@ if (isKnownLegacyOpenVikingServer(mcp.mcpServers["ov-mcp-server"])) {
 const server = {
   ...templateServer,
   command: nodeBin,
-  args: [path.join(root, "servers", "mcp-proxy.mjs")],
+  args: [joinRoot("servers/mcp-proxy.mjs")],
   env: { ...(templateServer.env || {}), ...integrationEnv },
 };
 mcp.mcpServers.openviking = server;
@@ -2509,19 +2574,27 @@ try {
   process.exit(0);
 }
 if (typeof config !== "object" || config === null || Array.isArray(config)) process.exit(0);
-// Remove openviking hooks from each event
+// Remove openviking hooks from each event — our tag or any reference to our
+// hook scripts (manual installs point at a copied plugin dir without the tag).
+const hookScriptNames = [
+  "zcode-hook.mjs", "session-start.mjs", "auto-recall.mjs",
+  "auto-capture.mjs", "uri-guard.mjs", "pre-compact.mjs", "session-end.mjs",
+];
 if (config.hooks?.events) {
   for (const [event, handlers] of Object.entries(config.hooks.events)) {
-    config.hooks.events[event] = (Array.isArray(handlers) ? handlers : []).filter(
-      (group) => !JSON.stringify(group).includes("openviking-memory"),
-    );
+    config.hooks.events[event] = (Array.isArray(handlers) ? handlers : []).filter((group) => {
+      const text = JSON.stringify(group || {});
+      return !(text.includes("openviking-memory") || hookScriptNames.some((name) => text.includes(name)));
+    });
     if (config.hooks.events[event].length === 0) delete config.hooks.events[event];
   }
   if (Object.keys(config.hooks.events).length === 0) delete config.hooks.events;
 }
-// Remove openviking MCP server — ONLY if it's managed by us (contains openviking-memory tag)
+// Remove openviking MCP server — ONLY if it's managed by us (our tag or an
+// earlier manual OpenViking install whose env keys carry OPENVIKING_*).
 if (config.mcp?.servers?.openviking) {
-  if (JSON.stringify(config.mcp.servers.openviking).includes("openviking-memory")) {
+  const serverText = JSON.stringify(config.mcp.servers.openviking);
+  if (serverText.includes("openviking-memory") || /openviking/i.test(serverText)) {
     delete config.mcp.servers.openviking;
     if (Object.keys(config.mcp.servers).length === 0) delete config.mcp.servers;
     if (Object.keys(config.mcp).length === 0) delete config.mcp;
@@ -2634,6 +2707,17 @@ if (exists) {
 }
 
 // --- Merge hooks ---
+// A group is ours if it carries the openviking-memory tag or references one of
+// our hook scripts — earlier manual installs pointed straight at a copied
+// plugin dir and carry neither the tag nor an OpenViking path fragment.
+const hookScriptNames = [
+  "zcode-hook.mjs", "session-start.mjs", "auto-recall.mjs",
+  "auto-capture.mjs", "uri-guard.mjs", "pre-compact.mjs", "session-end.mjs",
+];
+function ownsHookGroup(group) {
+  const text = JSON.stringify(group || {});
+  return text.includes("openviking-memory") || hookScriptNames.some((name) => text.includes(name));
+}
 if (fs.existsSync(hooksPath)) {
   const hooks = JSON.parse(fs.readFileSync(hooksPath, "utf8"));
   config.hooks = config.hooks || {};
@@ -2641,9 +2725,7 @@ if (fs.existsSync(hooksPath)) {
   config.hooks.events = config.hooks.events || {};
   if (hooks.hooks) {
     for (const [event, handlers] of Object.entries(hooks.hooks)) {
-      const existing = (config.hooks.events[event] || []).filter(
-        (group) => !JSON.stringify(group).includes("openviking-memory"),
-      );
+      const existing = (config.hooks.events[event] || []).filter((group) => !ownsHookGroup(group));
       config.hooks.events[event] = [...existing, ...handlers];
     }
   }
@@ -2660,8 +2742,11 @@ if (fs.existsSync(mcpPath)) {
     if (mcp.openviking) incoming.openviking = mcp.openviking;
     for (const [name, server] of Object.entries(incoming)) {
       const existing = config.mcp.servers[name];
-      // Only replace if the entry doesn't exist OR is already managed by us
-      if (existing && !JSON.stringify(existing).includes("openviking-memory")) {
+      const existingText = existing ? JSON.stringify(existing) : "";
+      // Only replace if the entry doesn't exist OR is already managed by us —
+      // our tag, or an earlier manual OpenViking install (its env keys carry
+      // OPENVIKING_* even when the paths don't mention openviking).
+      if (existing && !existingText.includes("openviking-memory") && !/openviking/i.test(existingText)) {
         process.stderr.write(`Skipping ${name} MCP server: already exists and is not managed by OpenViking\n`);
         continue;
       }
@@ -2680,13 +2765,21 @@ ZCODE_MERGE_NODE
 
 install_zcode() {
   heading "$(t 'ZCode integration' 'ZCode 集成')"
-  local root hooks_path mcp_path config_path
+  local root hooks_path mcp_path config_path node_bin hook_style="shell"
   root="$(assemble_agent_integration zcode-memory-plugin zcode)" || return 1
+  node_bin="$NODE_BIN"
+  if [ "$OV_NATIVE" -eq 1 ]; then
+    # ZCode Desktop on Windows spawns commands directly (no shell): native
+    # paths and structured process hooks are required for it to run them.
+    root="$(native_path "$root")"
+    node_bin="$(native_node_bin)"
+    hook_style="process"
+  fi
   hooks_path="$HOME/.zcode/hooks.json"
   mcp_path="$(zcode_mcp_path)"
   config_path="$HOME/.zcode/cli/config.json"
   mkdir -p "$HOME/.zcode/cli"
-  agent_write_json_configs zcode "$hooks_path" "$mcp_path" "$root" zcode "$NODE_BIN"
+  agent_write_json_configs zcode "$hooks_path" "$mcp_path" "$root" zcode "$node_bin" "$hook_style"
   # ZCode reads hooks from config.json → hooks.events, not a standalone hooks.json.
   # Merge the generated hooks.json and mcp.json into config.json so ZCode picks them up.
   zcode_merge_config "$config_path" "$hooks_path" "$mcp_path" \
@@ -3440,6 +3533,9 @@ select_language
 heading "$(t '1. Environment check' '1. 环境检查')"
 case "$(uname -s)" in
   Darwin|Linux) info "OS: $(uname -s)" ;;
+  MINGW*|MSYS*|CYGWIN*)
+    warn "$(t 'Windows (Git Bash/MSYS): only the zcode harness is supported on this platform; other harnesses are untested.' '检测到 Windows（Git Bash/MSYS）：此平台仅支持 zcode harness，其他 harness 未经验证。')"
+    ;;
   *) err "Unsupported OS: $(uname -s). Only macOS and Linux are supported."; exit 1 ;;
 esac
 command -v node >/dev/null 2>&1 || { err "$(t 'node not found. Install Node.js 18+.' '未找到 node，请先安装 Node.js 18+。')"; exit 1; }

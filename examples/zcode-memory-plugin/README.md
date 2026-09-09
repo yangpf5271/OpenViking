@@ -27,6 +27,12 @@ bash examples/memory-plugin-shared/install.sh --harness zcode
 
 The installer detects ZCode via `~/.zcode/` or a `zcode` binary, merges hooks and MCP config into `~/.zcode/cli/config.json`, and writes OpenViking credentials to `~/.openviking/ovcli.conf`.
 
+On Windows, run the installer from Git Bash. From a local checkout of this repository (`--source dev` is auto-detected there; `--yes` skips the prompts), ZCode Desktop gets its hooks and MCP server installed as native process entries with Windows paths, and every script lands under the fixed user directory `~/.openviking/agent-integrations/` — the checkout is only read during installation, so it can be moved or deleted afterwards. Re-run the same command to update:
+
+```bash
+bash examples/memory-plugin-shared/install.sh --harness zcode --source dev --yes
+```
+
 ## Architecture
 
 The plugin vendors the shared runtime into `scripts/shared/` via `sync.mjs`. The dispatcher (`zcode-hook.mjs`) branches on event name; three thin shim scripts set an environment variable and import the dispatcher, while the URI guard has its own entry point. Shared runtime modules provide recall, batching, pending queue, credential resolution, and MCP proxying; `zcode-capture.mjs` owns the ZCode-specific acknowledgement and cursor state transition.

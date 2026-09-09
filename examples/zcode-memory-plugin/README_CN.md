@@ -21,6 +21,12 @@ bash examples/memory-plugin-shared/install.sh --harness zcode
 
 安装脚本通过 `~/.zcode/` 或 `zcode` 二进制检测 ZCode，将 hooks 和 MCP 配置合并到 `~/.zcode/cli/config.json`，并将 OpenViking 凭据写入 `~/.openviking/ovcli.conf`。
 
+Windows 下请在 Git Bash 中运行。在本仓库的 checkout 里执行下面的命令（checkout 内会自动使用 `--source dev`；`--yes` 跳过交互确认），即可安装到 ZCode 桌面端：hooks 与 MCP 以原生 process 形态写入 Windows 路径，所有运行时脚本统一落户到用户目录 `~/.openviking/agent-integrations/`——仓库只在安装那一刻被读取，之后可以随意移动或删除。更新插件时重跑同一条命令即可：
+
+```bash
+bash examples/memory-plugin-shared/install.sh --harness zcode --source dev --yes
+```
+
 ## 架构
 
 插件通过 `sync.mjs` 将共享运行时 vendor 到 `scripts/shared/`。调度器（`zcode-hook.mjs`）按事件名分支；三个轻量 shim 设置环境变量并导入调度器，URI guard 使用独立入口。共享运行时提供召回、批量写入、待处理队列、凭据解析和 MCP 代理；`zcode-capture.mjs` 负责 ZCode 特有的确认与游标状态转换。
