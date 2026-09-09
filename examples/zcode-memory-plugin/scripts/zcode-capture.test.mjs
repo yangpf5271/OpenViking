@@ -179,3 +179,22 @@ test("repeated prompt text clears only after the latest matching user is acknowl
   assert.equal(complete.lastTurnId, "turn-002");
   assert.equal(complete.pendingPrompt, null);
 });
+
+test("peer id is stamped onto payloads only when provided", () => {
+  const turns = [
+    { role: "user", content: "real question", turnId: "turn-001" },
+    { role: "assistant", content: "real answer", turnId: "turn-001" },
+  ];
+
+  const withoutPeer = buildZcodeCapturePlan(turns, {});
+  assert.deepEqual(withoutPeer.payloads, [
+    { role: "user", content: "real question", turn_id: "turn-001" },
+    { role: "assistant", content: "real answer", turn_id: "turn-001" },
+  ]);
+
+  const withPeer = buildZcodeCapturePlan(turns, {}, {}, "github.com-acme-repo");
+  assert.deepEqual(withPeer.payloads, [
+    { role: "user", content: "real question", turn_id: "turn-001", peer_id: "github.com-acme-repo" },
+    { role: "assistant", content: "real answer", turn_id: "turn-001", peer_id: "github.com-acme-repo" },
+  ]);
+});

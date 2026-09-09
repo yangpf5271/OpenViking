@@ -8,7 +8,7 @@ export function zcodeTurnDedupKey(turn) {
     : stableHash(turn.role, turn.content);
 }
 
-export function buildZcodeCapturePlan(turns, state = {}, cfg = {}) {
+export function buildZcodeCapturePlan(turns, state = {}, cfg = {}, peerId = "") {
   const capturedTurnIds = new Set(
     Array.isArray(state.capturedTurnIds) ? state.capturedTurnIds : [],
   );
@@ -25,6 +25,10 @@ export function buildZcodeCapturePlan(turns, state = {}, cfg = {}) {
     role: turn.role,
     content,
     ...(turn.turnId ? { turn_id: turn.turnId } : {}),
+    // Extraction files user messages under user/<uid>/peers/<peer_id>/ only
+    // when the message body carries peer_id — the Actor-Peer header alone
+    // scopes recall but never routes captures out of the shared self space.
+    ...(peerId ? { peer_id: peerId } : {}),
   }));
   return { candidates, toSend, payloads };
 }

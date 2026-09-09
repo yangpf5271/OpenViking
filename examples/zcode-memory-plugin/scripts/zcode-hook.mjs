@@ -68,6 +68,7 @@ let nativeSessionId = "";
 let sessionId = "";
 let cwd = "";
 let fetchJSON;
+let actorPeerId = "";
 
 async function main() {
   if (!cfg.enabled || shouldBypassAgent(cfg, input)) {
@@ -138,7 +139,7 @@ async function main() {
     if (!cfg.autoCapture) return;
     await withAgentHookLock("zcode", nativeSessionId, async () => {
       state = await readHookState("zcode", nativeSessionId);
-      const plan = buildZcodeCapturePlan(buildZcodeTurns(input, state), state, cfg);
+      const plan = buildZcodeCapturePlan(buildZcodeTurns(input, state), state, cfg, actorPeerId);
 
       // Fail-closed: if no turns and no dedup keys, skip silently (not an error —
       // could be a Stop with no new content, or a race with UserPromptSubmit).
@@ -183,7 +184,8 @@ async function run() {
   nativeSessionId = resolveNativeSessionId(input);
   sessionId = deriveAgentSessionId("zc-", input);
   cwd = resolveAgentCwd(input);
-  ({ fetchJSON } = makeAgentFetchJSON(cfg, cwd));
+  ({ fetchJSON, effectivePeer } = makeAgentFetchJSON(cfg, cwd));
+  actorPeerId = effectivePeer.peerId || "";
   await main();
 }
 
