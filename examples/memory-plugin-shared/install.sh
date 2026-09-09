@@ -548,6 +548,13 @@ if (account !== "__OPENVIKING_KEEP__") {
 if (user !== "__OPENVIKING_KEEP__") {
   if (user) c.user = user; else delete c.user;
 }
+// Per-project recall isolation on by default: recall sees the shared pool
+// plus this workspace's peers/<peer>/ subtree once a peer exists. An already
+// configured value, or OPENVIKING_RECALL_PEER_SCOPE, wins over this default.
+c.plugin = (c.plugin && typeof c.plugin === "object" && !Array.isArray(c.plugin)) ? c.plugin : {};
+if (c.plugin.recall?.peer_scope === undefined) {
+  c.plugin.recall = { ...(c.plugin.recall || {}), peer_scope: process.env.OPENVIKING_RECALL_PEER_SCOPE || "actor" };
+}
 fs.mkdirSync(require("node:path").dirname(file), { recursive: true });
 fs.writeFileSync(file, JSON.stringify(c, null, 2) + "\n", { mode: 0o600 });
 NODE

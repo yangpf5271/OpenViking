@@ -46,6 +46,15 @@ export function loadAgentHookConfig(clientId) {
   const credentials = resolveOpenVikingCredentials();
   const debugLogPath = process.env.OPENVIKING_DEBUG_LOG
     || join(homedir(), ".openviking", "logs", `${clientId}-hooks.log`);
+  // The ovcli `plugin` section speaks the same nested knobs as workspace
+  // config files (plugin.<client>.recall.peer_scope overrides plugin.recall.
+  // peer_scope). Shared-lib harnesses don't load workspace-config layers, so
+  // this section is the only path they get; the env var still wins.
+  const plugin = (credentials.cliFile && typeof credentials.cliFile.plugin === "object"
+    && !Array.isArray(credentials.cliFile.plugin)) ? credentials.cliFile.plugin : {};
+  const pluginForClient = (plugin[clientId] && typeof plugin[clientId] === "object") ? plugin[clientId] : {};
+  const configuredScope = pluginForClient.recall?.peer_scope ?? plugin.recall?.peer_scope;
+  const envScope = process.env.OPENVIKING_RECALL_PEER_SCOPE;
   return {
     ...credentials,
     clientId,
@@ -63,7 +72,9 @@ export function loadAgentHookConfig(clientId) {
     recallMaxContentChars: envNumber("OPENVIKING_RECALL_MAX_CONTENT_CHARS", 500, 50),
     scoreThreshold: envNumber("OPENVIKING_SCORE_THRESHOLD", 0.35, 0),
     recallPreferAbstract: envBool("OPENVIKING_RECALL_PREFER_ABSTRACT", true),
-    recallPeerScope: process.env.OPENVIKING_RECALL_PEER_SCOPE === "actor" ? "actor" : "all",
+    recallPeerScope: (envScope === "actor" || envScope === "all")
+      ? envScope
+      : (configuredScope === "actor" || configuredScope === "all" ? configuredScope : "all"),
     timeoutMs: envNumber("OPENVIKING_TIMEOUT_MS", 15000, 1000),
     profileTokenBudget: envNumber("OPENVIKING_PROFILE_TOKEN_BUDGET", 6000, 500),
     commitTurnThreshold: envNumber("OPENVIKING_COMMIT_TURN_THRESHOLD", 8, 1),
