@@ -9,8 +9,9 @@
 #   bash <(curl -fsSL https://ovrelease.tos-cn-beijing.volces.com/memory-plugin-shared/install.sh) --dist tos
 # Non-interactive:
 #   bash install.sh --harness claude,codex,cursor,trae,trae-cn,trae-cli,zcode,opencode,pi,dsh --dist github --lang en --url http://127.0.0.1:1933
-# Windows (Git Bash) — ZCode Desktop only; run from a checkout, scripts settle
-# into ~/.openviking/agent-integrations and the checkout is free to move after:
+# Windows (Git Bash) — zcode (desktop) works everywhere; claude and codex are
+# verified from a checkout (--source dev). Scripts settle into
+# ~/.openviking/agent-integrations and the checkout is free to move after:
 #   bash install.sh --harness zcode --source dev --yes
 # Format-compatible CLI aliases:
 #   bash install.sh --harness trae-cli
@@ -42,8 +43,8 @@
 # ~/.claude/settings.json. That path needs a local copy of the plugin, so it
 # fetches the source even in remote mode.
 #
-# Targets bash 3.2+ (macOS /bin/bash) and Linux; on Windows only the zcode
-# harness is supported, via Git Bash.
+# Targets bash 3.2+ (macOS /bin/bash) and Linux; on Windows (Git Bash) the
+# zcode, claude, and codex harnesses are supported.
 
 set -Eeuo pipefail
 
@@ -1340,7 +1341,7 @@ configure_ovcli() {
 
 fetch_archive() { # fetch_archive <url> <dest> <required-subpath>
   local url="$1" dest="$2" need="$3" tmp_zip tmp_dir top
-  command -v unzip >/dev/null 2>&1 || { err 'unzip not found; required to install from an archive.'; exit 1; }
+  command -v unzip >/dev/null 2>&1 || { err 'unzip not found; required to install from an archive. On Windows (Git Bash) install unzip (scoop/choco), or use --source remote/dev instead.'; exit 1; }
   tmp_zip=$(mktemp "${TMPDIR:-/tmp}/ov-src.XXXXXX") || { err 'mktemp failed'; exit 1; }
   tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/ov-src.XXXXXX") || { err 'mktemp failed'; rm -f "$tmp_zip"; exit 1; }
   info "$(t 'Downloading archive' '下载归档')"
@@ -1656,6 +1657,12 @@ install_claude_legacy() {
   hooks_src="$plugin_dir/hooks/hooks.json"
   ts=$(date +%Y%m%d-%H%M%S)
 
+  if [ "$OV_NATIVE" -eq 1 ]; then
+    # Hooks merged into settings.json run directly on Windows; expand
+    # ${CLAUDE_PLUGIN_ROOT} to a native path, not an MSYS one.
+    plugin_dir="$(native_path "$plugin_dir")"
+  fi
+
   info "Legacy mode: $CLAUDE_BIN mcp add (stdio proxy) + merging hooks into $CC_SETTINGS"
   claude_cmd mcp remove openviking -s user >/dev/null 2>&1 || true
   claude_cmd mcp add --scope user openviking -- node "$plugin_dir/servers/mcp-proxy.mjs" || {
@@ -1705,6 +1712,11 @@ register_statusline() {
     warn 'statusline needs the plugin sources on disk and none could be fetched; skipping'
     return 0
   }
+  if [ "$OV_NATIVE" -eq 1 ]; then
+    # Claude Code runs the statusline command itself on Windows; embed a native
+    # path so it resolves without an MSYS shell.
+    plugin_dir="$(native_path "$plugin_dir")"
+  fi
   cmd="node \"$plugin_dir/scripts/statusline.mjs\""
   mkdir -p "$HOME/.claude"
   [ -f "$CC_SETTINGS" ] || echo '{}' > "$CC_SETTINGS"
@@ -3534,7 +3546,7 @@ heading "$(t '1. Environment check' '1. 环境检查')"
 case "$(uname -s)" in
   Darwin|Linux) info "OS: $(uname -s)" ;;
   MINGW*|MSYS*|CYGWIN*)
-    warn "$(t 'Windows (Git Bash/MSYS): only the zcode harness is supported on this platform; other harnesses are untested.' '检测到 Windows（Git Bash/MSYS）：此平台仅支持 zcode harness，其他 harness 未经验证。')"
+    warn "$(t 'Windows (Git Bash/MSYS): zcode, claude, and codex are supported here (claude/codex from a checkout, --source dev); other harnesses are untested.' '检测到 Windows（Git Bash/MSYS）：此平台支持 zcode、claude、codex（claude/codex 需在本仓库 checkout 内以 --source dev 安装）；其他 harness 未经验证。')"
     ;;
   *) err "Unsupported OS: $(uname -s). Only macOS and Linux are supported."; exit 1 ;;
 esac
