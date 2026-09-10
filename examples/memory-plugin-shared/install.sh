@@ -188,6 +188,22 @@ native_node_bin() {
   printf '%s' "$p"
 }
 
+# source_key <value> — canonical form for marketplace-source equality checks.
+# On Windows the harnesses report native backslash paths (C:\a\b) while this
+# script passes MSYS ones (/c/a/b); flatten both (plus case) so the same
+# directory compares equal. URLs and scp-style remotes pass through untouched.
+source_key() {
+  local v="$1"
+  case "$v" in
+    *"://"*|*@*:*) printf '%s' "$v"; return 0 ;;
+  esac
+  if [ -n "$CYGPATH_BIN" ]; then
+    v="$(cygpath -m -- "$v" 2>/dev/null || printf '%s' "$v")"
+  fi
+  v="${v//\\//}"
+  printf '%s' "$v" | tr '[:upper:]' '[:lower:]'
+}
+
 usage() {
   cat <<EOF
 Usage: install.sh [options]
@@ -1630,7 +1646,7 @@ NODE
 claude_marketplace_sync() { # claude_marketplace_sync <add-target> <expected-source>
   local target="$1" needle="$2" current
   current="$(claude_marketplace_current_source)"
-  if [ -n "$current" ] && [ "$current" = "$needle" ]; then
+  if [ -n "$current" ] && [ "$(source_key "$current")" = "$(source_key "$needle")" ]; then
     info "$CLAUDE_BIN plugin marketplace update ($MARKETPLACE_NAME)"
     claude_cmd plugin marketplace update "$MARKETPLACE_NAME" || \
       warn 'marketplace update returned non-zero — continuing'
@@ -1865,8 +1881,12 @@ codex_marketplace_current_source() {
         const parsed = JSON.parse(raw);
         const list = Array.isArray(parsed) ? parsed : (parsed.marketplaces || []);
         const m = list.find((x) => x.name === process.argv[1]);
-        if (m && m.marketplaceSource) process.stdout.write(String(m.marketplaceSource.source || ""));
-        else if (m) process.stdout.write(String(m.path || m.repo || m.url || m.source || ""));
+        if (m) {
+          const s = m.marketplaceSource || {};
+          // codex reports a local directory as { name, root }; older builds and
+          // git sources carry marketplaceSource/path/url instead.
+          process.stdout.write(String(s.source || s.path || s.url || m.root || m.path || m.repo || m.url || m.source || ""));
+        }
       } catch {}
     });
   ' "$MARKETPLACE_NAME" 2>/dev/null || true
@@ -1906,7 +1926,7 @@ codex_marketplace_sync() { # codex_marketplace_sync <expected-source> <add-args.
   local needle="$1" current
   shift
   current="$(codex_marketplace_current_source)"
-  if [ -n "$current" ] && [ "$current" = "$needle" ]; then
+  if [ -n "$current" ] && [ "$(source_key "$current")" = "$(source_key "$needle")" ]; then
     info "$CODEX_BIN plugin marketplace upgrade ($MARKETPLACE_NAME)"
     codex_cmd plugin marketplace upgrade "$MARKETPLACE_NAME" >/dev/null 2>&1 || true
     return 0
