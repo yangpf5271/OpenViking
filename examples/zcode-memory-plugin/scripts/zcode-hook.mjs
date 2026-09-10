@@ -68,6 +68,7 @@ let nativeSessionId = "";
 let sessionId = "";
 let cwd = "";
 let fetchJSON;
+let effectivePeer = null;
 let actorPeerId = "";
 
 async function main() {
