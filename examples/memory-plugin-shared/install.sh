@@ -552,20 +552,44 @@ mask_secret() {
   printf '%s…%s (%s)' "$(printf '%s' "$s" | cut -c1-4)" "$(printf '%s' "$s" | tail -c 4)" "${#s}"
 }
 
+has_unsendable_chars() { # has_unsendable_chars <value> — value cannot ride in an HTTP header
+  # Header values are ByteStrings (code points ≤ U+00FF). Credentials holding
+  # larger characters make every runtime fetch fail with a cryptic "Cannot
+  # convert argument to a ByteString" error; detectable here, at install time.
+  [ -n "$1" ] && [ -n "${NODE_BIN:-}" ] || return 1
+  "$NODE_BIN" -e 'process.exit(/[^\u0000-\u00FF]/.test(process.argv[1]) ? 0 : 1)' "$1" 2>/dev/null
+}
+
 json_merge_ovcli() {
   local file="$1" url="$2" key="$3" account="$4" user="$5"
   node - "$file" "$url" "$key" "$account" "$user" <<'NODE'
 const fs = require("node:fs");
 const [file, url, apiKey, account, user] = process.argv.slice(2);
+// Mirror of normalizeCredentialText (lib/credentials.mjs): undo text-editor
+// damage on hand-typed credentials so the file holds the ASCII the server
+// issued. Inline because this heredoc runs standalone.
+const FIXUPS = { "\u2026": "...", "\u2018": "'", "\u2019": "'", "\u201A": "'",
+  "\u2039": "'", "\u203A": "'", "\u201C": '"', "\u201D": '"', "\u201E": '"',
+  "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
+  "\u00A0": " ", "\u3000": " ", "\u200B": "", "\u200C": "", "\u200D": "",
+  "\uFEFF": "", "\u00AD": "" };
+function normalizeText(v) {
+  if (typeof v !== "string" || !v) return v;
+  let out = v.normalize("NFKC");
+  out = [...out].map((ch) => FIXUPS[ch] ?? ch).join("");
+  return out.trim();
+}
 let c = {};
 try { c = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
 if (url) c.url = url;
-if (apiKey !== "__OPENVIKING_KEEP__") c.api_key = apiKey;
+if (apiKey !== "__OPENVIKING_KEEP__") c.api_key = normalizeText(apiKey);
 if (account !== "__OPENVIKING_KEEP__") {
-  if (account) c.account = account; else delete c.account;
+  const a = normalizeText(account);
+  if (a) c.account = a; else delete c.account;
 }
 if (user !== "__OPENVIKING_KEEP__") {
-  if (user) c.user = user; else delete c.user;
+  const u = normalizeText(user);
+  if (u) c.user = u; else delete c.user;
 }
 // Per-project recall isolation on by default: recall sees the shared pool
 // plus this workspace's peers/<peer>/ subtree once a peer exists. An already
@@ -1357,6 +1381,22 @@ configure_ovcli() {
   if [ "$key" != "__OPENVIKING_KEEP__" ] && [ "$key" != "$current_key" ]; then
     info "$(t 'Updated:' '已更新：') api_key: $(mask_secret "$current_key") -> $(mask_secret "$key")"
   fi
+  # json_merge_ovcli folds editor damage before writing, so what is on disk is
+  # the truth. Report a normalization, and flag anything that still cannot ride
+  # in an HTTP header (no ASCII equivalent — genuine CJK etc.).
+  local fld pre post
+  while IFS='|' read -r fld pre post; do
+    if [ -n "$pre" ] && [ "$pre" != "__OPENVIKING_KEEP__" ] && [ "$pre" != "$post" ]; then
+      info "$(t "Normalized $fld: folded editor-damaged characters back to ASCII." "$fld 已归一化：编辑器损坏字符已自动纠正为等价 ASCII。")"
+    fi
+    if [ -n "$post" ] && has_unsendable_chars "$post"; then
+      warn "$(t "$fld still contains characters above Latin-1 that cannot be carried in HTTP headers; hook requests will fail with a ByteString error until it is replaced with ASCII-safe text." "$fld 仍含超出 Latin-1 的字符，无法放入 HTTP 请求头；运行时钩子请求会报 ByteString 错误，请改为纯 ASCII 内容。")"
+    fi
+  done <<EOF
+api_key|$key|$(json_get "$OVCLI_CONF" api_key)
+account|$account|$(json_get "$OVCLI_CONF" account)
+user|$user|$(json_get "$OVCLI_CONF" user)
+EOF
   info "$(t 'Credentials ready:' '凭据已就绪：') $OVCLI_CONF"
   info "$(t 'Reconfigure later by re-running this installer.' '之后可重跑本安装脚本重新配置。')"
 }

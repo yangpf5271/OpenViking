@@ -50,6 +50,36 @@ export function readManifestVersion(manifest) {
   }
 }
 
+// Editor damage that still "looks right" to a human, mapped back to the ASCII
+// the server issued. NFKC covers full-width forms and the typographic
+// ellipsis; the map covers smart quotes/dashes and invisible characters
+// (BOM, zero-width spaces, soft hyphen) that NFKC leaves alone.
+const CREDENTIAL_TEXT_FIXUPS = new Map(Object.entries({
+  "\u2026": "...",
+  "\u2018": "'", "\u2019": "'", "\u201A": "'", "\u2039": "'", "\u203A": "'",
+  "\u201C": '"', "\u201D": '"', "\u201E": '"',
+  "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
+  "\u00A0": " ", "\u3000": " ",
+  "\u200B": "", "\u200C": "", "\u200D": "", "\uFEFF": "", "\u00AD": "",
+}));
+
+/**
+ * Fold hand-edited credential text back to its intended ASCII. A key pasted
+ * through a text editor or IME may carry characters that look identical but
+ * byte-differ from what the server stored — "..." rewritten as "…", straight
+ * quotes curled, dashes lengthened, full-width forms substituted, a BOM or
+ * trailing spaces appended. NFKC plus the targeted map undoes exactly that
+ * class of damage and trims the ends; text with no ASCII equivalent (genuine
+ * CJK etc.) is kept untouched — it can never match server-side, and the
+ * installer warns about it at configuration time.
+ */
+export function normalizeCredentialText(value) {
+  if (typeof value !== "string" || !value) return value;
+  let out = value.normalize("NFKC");
+  out = [...out].map((ch) => CREDENTIAL_TEXT_FIXUPS.get(ch) ?? ch).join("");
+  return out.trim();
+}
+
 function looksLikeOvcli(obj) {
   if (!obj || typeof obj !== "object") return false;
   if (obj.server && typeof obj.server === "object") return false;
@@ -201,17 +231,25 @@ export function resolveOpenVikingCredentials(env = process.env) {
     else credentialPath = files.ovPath;
   }
 
+  // Hand-edited conf files often carry editor damage that still looks right
+  // (see normalizeCredentialText). Fold it back here — the one choke point
+  // every harness reads credentials through — so the key the server sees is
+  // the key the human typed.
+  const cleanKey = normalizeCredentialText(apiKey);
+  const cleanAccount = normalizeCredentialText(account);
+  const cleanUser = normalizeCredentialText(user);
+
   return {
     ...files,
     credentialSource: useCli ? "ovcli" : ((mode === "env" || envHasCredentials) ? "env" : "auto"),
     credentialPath,
     baseUrl,
     mcpUrl,
-    apiKey,
-    account,
-    user,
+    apiKey: cleanKey,
+    account: cleanAccount,
+    user: cleanUser,
     peerId,
-    hasApiKey: Boolean(apiKey),
+    hasApiKey: Boolean(cleanKey),
   };
 }
 
