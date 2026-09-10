@@ -35,8 +35,11 @@
 #   remote   Remote marketplaces (see --dist). Default.
 #   archive  Download the marketplace archive and register it as a local
 #            directory marketplace for both harnesses.
-#   dev      Register this checkout's examples/ directory as the marketplace.
-#            Auto-selected when running from a repo checkout.
+#   dev      Stage the checkout's examples/ into ~/.openviking and register the
+#            staged copy as the marketplace, so the checkout can move or be
+#            deleted after installing. Auto-selected when running from a repo
+#            checkout. Set OPENVIKING_DEV_DIRECT=1 to register the checkout
+#            directory itself instead (edits picked up without re-running).
 #
 # Legacy Claude Code (< 2.0, no `claude plugin`) is still supported: the
 # installer falls back to `claude mcp add` (stdio proxy) + a hooks merge into
@@ -1221,7 +1224,7 @@ select_dist() {
       tui_menu "$(t 'Install source' '安装源模式')" 2 \
         "GitHub  $(t '(remote marketplace; supports remote updates)' '（远程 marketplace；支持远程更新）')" \
         "$(t 'Volcengine TOS mirror (use when GitHub is unreachable)' '火山引擎 TOS 镜像（无法访问 GitHub 时使用）')" \
-        "$(t 'This checkout (development; edits take effect live)' '当前 checkout（开发模式；改动即时生效）')"
+        "$(t 'This checkout (development; staged into ~/.openviking)' '当前 checkout（开发模式；拷贝至 ~/.openviking 后注册）')"
       case "$TUI_MENU_CHOICE" in
         0) DIST="github" ;;
         1) DIST="tos" ;;
@@ -1465,7 +1468,21 @@ plugin_dir_on_disk() { # plugin_dir_on_disk <plugin-subdir>
 prepare_marketplace_dir() {
   case "$SOURCE_MODE" in
     dev)
-      MKT_DIR="$CHECKOUT_DIR/examples"
+      if [ "${OPENVIKING_DEV_DIRECT:-0}" = "1" ]; then
+        # Plugin-development escape hatch: register the checkout itself so
+        # `marketplace update` picks up edits without re-running the installer.
+        MKT_DIR="$CHECKOUT_DIR/examples"
+      else
+        # Stage a self-contained copy under ~/.openviking and register that, so
+        # no harness config embeds the checkout's path and the checkout is free
+        # to move or delete after installing (same contract as the
+        # agent-integrations dirs). Re-run the installer to refresh the copy.
+        MKT_DIR="$OV_HOME/marketplaces/openviking-dev"
+        info "$(t 'Staging checkout examples into' '将 checkout 的 examples 拷贝至') $MKT_DIR"
+        rm -rf "$MKT_DIR"
+        mkdir -p "$MKT_DIR"
+        cp -R "$CHECKOUT_DIR/examples/." "$MKT_DIR/"
+      fi
       ;;
     archive)
       heading "$(t '3. Marketplace archive' '3. Marketplace 归档')"
