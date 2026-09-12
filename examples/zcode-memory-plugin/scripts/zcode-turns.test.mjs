@@ -363,3 +363,26 @@ test("isolation: independent lastTurnId state per session", () => {
   assert.equal(turnsB[0].turnId, "B-001");
   assert.equal(turnsB[2].turnId, "B-002");
 });
+
+test("extractUnseenRolloutTurns dedupes the user prompt re-sent by every model_io entry of one turn", () => {
+  // Agentic tool loop: one user turn, many model calls, each request.messages
+  // still ends with the same user prompt. Previously each entry re-emitted
+  // the user message — a single prompt was captured once per model call.
+  const userMsg = { role: "user", content: "分析下缺陷的1,2,3" };
+  const { fakeHome, sessionId } = createFakeRolloutHome([
+    { turnId: "turn-dup", request: { messages: [userMsg] }, response: { text: "answer draft 1" } },
+    { turnId: "turn-dup", request: { messages: [userMsg, { role: "assistant", content: "tool call" }, { role: "user", content: "tool result" }, userMsg] }, response: { text: "" } },
+    { turnId: "turn-dup", request: { messages: [userMsg, { role: "user", content: "tool result 2" }, userMsg] }, response: { text: "final answer" } },
+  ]);
+  const turns = extractUnseenRolloutTurns(
+    join(fakeHome, ".zcode", "cli", "rollout", `model-io-${sessionId}.jsonl`),
+    null,
+  );
+  const userTurns = turns.filter((t) => t.role === "user");
+  assert.equal(userTurns.length, 1, "same user prompt within one turn must be captured once");
+  assert.equal(userTurns[0].content, "分析下缺陷的1,2,3");
+  assert.equal(userTurns[0].turnId, "turn-dup");
+  // Assistant entries keep their per-call texts
+  const assistantTurns = turns.filter((t) => t.role === "assistant");
+  assert.equal(assistantTurns.length, 2);
+});

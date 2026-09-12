@@ -116,6 +116,7 @@ function readUnseenRolloutTurns(rolloutPath, lastKnownTurnId = null) {
   // lose prior turns). Previously only returned the last entry.
 
   const turns = [];
+  const seenUserKeys = new Set();
   for (let i = startIndex; i < lines.length; i++) {
     let entry;
     try {
@@ -127,7 +128,16 @@ function readUnseenRolloutTurns(rolloutPath, lastKnownTurnId = null) {
     const userContent = extractUserFromMessages(entry?.request?.messages || []);
     const assistantContent = cleanZcodeText(entry?.response?.text || "");
     if (userContent) {
-      turns.push({ role: "user", content: userContent, turnId });
+      // One user turn fans out into many model_io entries while the agent
+      // runs its tool loop, and every entry's request.messages still ends
+      // with the same user prompt. Keep only the first occurrence per
+      // (turnId, content) so a single prompt is captured once, not once per
+      // model call.
+      const userKey = `${turnId}\u0000${userContent}`;
+      if (!seenUserKeys.has(userKey)) {
+        seenUserKeys.add(userKey);
+        turns.push({ role: "user", content: userContent, turnId });
+      }
     }
     if (assistantContent) {
       turns.push({ role: "assistant", content: assistantContent, turnId });
