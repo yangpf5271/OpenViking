@@ -15,6 +15,7 @@ import { spawn } from "node:child_process";
 import { readFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { resolveWindowsCommand } from "../shared/doctor-core.mjs";
 
 const PROBE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PROBE_TIMEOUT_MS = 4000;
@@ -54,9 +55,26 @@ function childEnv() {
 
 function runCommand(command, args, { timeoutMs, input = "" }) {
   return new Promise((resolve) => {
+    // Windows: `claude` on PATH is npm's sh shim (Node cannot run it) and the
+    // `claude.cmd` beside it is refused outright (EINVAL) — resolve like
+    // cmd.exe and launch batch files through cmd.exe.
+    let file = command;
+    let argv = args;
+    let verbatim = false;
+    if (process.platform === "win32") {
+      const resolved = resolveWindowsCommand(command);
+      if (/\.(bat|cmd)$/i.test(resolved || "")) {
+      const quote = (value) => (/[\s"]/.test(value) ? `"${value}"` : value);
+      file = process.env.comspec || "cmd.exe";
+      argv = ["/d", "/s", "/c", `"${[resolved, ...args].map(quote).join(" ")}"`];
+      verbatim = true;
+      } else if (resolved) {
+        file = resolved;
+      }
+    }
     let child;
     try {
-      child = spawn(command, args, { env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(file, argv, { env: childEnv(), stdio: ["pipe", "pipe", "pipe"], windowsVerbatimArguments: verbatim });
     } catch {
       resolve({ ok: false, stdout: "", code: -1 });
       return;

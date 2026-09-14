@@ -16,7 +16,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { resolveWorkspaceSettings } from "./plugin-config.mjs";
 import { peerScopeMemoPath } from "./recall-core.mjs";
@@ -416,13 +416,69 @@ export function scanRcFiles(markers, home = homedir()) {
 // Commands
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve a bare command name the way cmd.exe would: PATH × PATHEXT, first
+ * directory that holds the name with any PATHEXT extension wins.
+ *
+ * Needed because the three launchers disagree on Windows: CMD finds and runs
+ * npm's `claude.cmd` shim, Git Bash runs the extensionless sh shim beside it,
+ * but execFile/spawn with no shell do neither — Node cannot execute a sh
+ * script at all and refuses batch files outright (EINVAL since the
+ * CVE-2024-27980 hardening), so an installed CLI looks "not on PATH".
+ * Returns "" when nothing matches; a name that already carries an extension
+ * or a path is returned as given.
+ */
+export function resolveWindowsCommand(name, env = process.env) {
+  if (!name) return "";
+  if (/[\\/]/.test(name) || /\.[A-Za-z]+$/.test(name)) return name;
+  const extensions = String(env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((ext) => ext.trim())
+    .filter(Boolean);
+  for (const dir of String(env.PATH || "").split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of extensions) {
+      const candidate = join(dir, `${name}${ext}`);
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch { /* not in this directory */ }
+    }
+  }
+  return "";
+}
+
+/**
+ * One cmd.exe command line for /s /c: Node joins argv verbatim when
+ * windowsVerbatimArguments is set, so every entry with spaces needs its own
+ * quotes and the whole line gets the outer pair /s strips again.
+ */
+function cmdShellArgv(file, args, env = process.env) {
+  const quote = (value) => (/[\s"]/.test(value) ? `"${value}"` : value);
+  return ["/d", "/s", "/c", `"${[file, ...args].map(quote).join(" ")}"`];
+}
+
 export function runCommand(command, args = [], { timeoutMs = 10000, env = process.env } = {}) {
+  let file = command;
+  let argv = args;
+  let verbatim = false;
+  if (process.platform === "win32") {
+    const resolved = resolveWindowsCommand(command, env);
+    if (/\.(bat|cmd)$/i.test(resolved || "")) {
+      // Node cannot spawn batch files itself; hand the line to cmd.exe.
+      file = env.comspec || "cmd.exe";
+      argv = cmdShellArgv(resolved, args, env);
+      verbatim = true;
+    } else if (resolved) {
+      file = resolved;
+    }
+  }
   try {
-    const stdout = execFileSync(command, args, {
+    const stdout = execFileSync(file, argv, {
       encoding: "utf-8",
       timeout: timeoutMs,
       env,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsVerbatimArguments: verbatim,
     });
     return { ok: true, stdout: String(stdout).trim(), stderr: "" };
   } catch (err) {
