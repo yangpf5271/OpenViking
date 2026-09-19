@@ -127,11 +127,18 @@ export function writeHostJsonConfigs({ kind, hooksPath, mcpPath, root, clientId,
     .map(([key, value]) => `${key}=${shellArg(value)}`)
     .join(" ");
 
+  // Values written INTO the user's config must keep forward slashes: the
+  // installer's validation and the uninstall/merge passes grep for the
+  // `scripts/hook.mjs` shape, and path.join would emit backslashes on Windows.
+  function joinRoot(rel) {
+    return `${String(root).replace(/[\\/]+$/u, "")}/${String(rel).replace(/^\.?\//u, "")}`.replace(/\\/gu, "/");
+  }
+
   function renderHookCommand(command) {
     const match = /^node\s+"?__OPENVIKING_PLUGIN_ROOT__\/([^\s"]+)"?(\s.*)?$/u.exec(command);
     if (!match) throw new Error(`Unsupported ${clientId} hook command template: ${command}`);
     const args = (match[2] || "").replaceAll("__OPENVIKING_CLIENT_ID__", clientId);
-    const rendered = `${shellArg(nodeBin)} ${shellArg(path.join(root, match[1]))}${args}`;
+    const rendered = `${shellArg(nodeBin)} ${shellArg(joinRoot(match[1]))}${args}`;
     return `${envPrefix} ${rendered} # openviking-memory`;
   }
 
@@ -145,7 +152,7 @@ export function writeHostJsonConfigs({ kind, hooksPath, mcpPath, root, clientId,
     return {
       type: "process",
       command: nodeBin,
-      args: [path.join(root, match[1]), ...(tail ? tail.split(/\s+/u) : [])],
+      args: [joinRoot(match[1]), ...(tail ? tail.split(/\s+/u) : [])],
       timeoutMs: Math.round((Number(hook.timeout) || 30) * 1000),
       env: { ...integrationEnv },
     };
@@ -204,7 +211,7 @@ export function writeHostJsonConfigs({ kind, hooksPath, mcpPath, root, clientId,
   mcp.mcpServers.openviking = {
     ...templateServer,
     command: nodeBin,
-    args: [path.join(root, "servers", "mcp-proxy.mjs")],
+    args: [joinRoot("servers/mcp-proxy.mjs")],
     env: { ...(templateServer.env || {}), ...integrationEnv },
   };
   atomicWrite(mcpPath, mcp);
