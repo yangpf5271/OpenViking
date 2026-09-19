@@ -4,7 +4,7 @@ import { injectStartupProfile } from "./lifecycle.mjs";
 import { mountOpenVikingMcp } from "./mcp.mjs";
 import { OpenVikingRuntime } from "./runtime.mjs";
 import { mountOpenVikingSkills } from "./skills.mjs";
-import { guardVikingUri } from "./uri-guard.mjs";
+import { guardVikingUri, noticeVikingUri } from "./uri-guard.mjs";
 
 export const name = "openviking-memory";
 export const inject = ["agents", "sessions", "tools"];
@@ -20,6 +20,14 @@ export function apply(ctx, input = {}) {
   ctx.effect(
     () => () => runtime.disposeAll(),
     "openvikingMemory.disposeAll()",
+  );
+  // The pending-queue drainer is the in-process recovery path: without it a
+  // single transient write failure latches capture/commit until the next dsh
+  // restart. Started here so every session shares one single-flight drainer.
+  runtime.startDrainer();
+  ctx.effect(
+    () => () => runtime.stopDrainer(),
+    "openvikingMemory.stopDrainer()",
   );
 
   ctx.on("agent/session-start", ({ agent }) => {
@@ -63,6 +71,7 @@ export function apply(ctx, input = {}) {
   });
 
   ctx.on("tools/pre-execute", guardVikingUri);
+  ctx.on("tools/post-execute", noticeVikingUri);
 
   // Mounted last, and deliberately not awaited: the bridge's apply blocks on
   // its first tools/list, so a server that accepts the connection but never
