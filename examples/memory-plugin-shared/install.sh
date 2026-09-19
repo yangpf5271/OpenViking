@@ -156,6 +156,26 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) OV_NATIVE=1; CYGPATH_BIN="$(command -v cygpath 2>/dev/null || true)" ;;
 esac
 
+# WSL is Linux to every check above, but the harnesses this installer
+# configures — ZCode Desktop, Claude Code, Codex — live on the Windows side.
+# Inside WSL the Windows-installed CLIs resolve through /mnt without their
+# Linux platform binaries (e.g. @openai/codex-linux-x64), and the install
+# would land in the Linux home the user never looks at. Refuse up front,
+# before any marketplace checkout or config write.
+case "$(uname -s)" in
+  Linux)
+    wsl_kernel=0
+    grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && wsl_kernel=1
+    case "$(uname -r 2>/dev/null | tr '[:upper:]' '[:lower:]')" in
+      *microsoft*) wsl_kernel=1 ;;
+    esac
+    if [ "$wsl_kernel" -eq 1 ] || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+      err "$(t 'Detected WSL (Linux on Windows). This installer configures the Windows-side ZCode/Claude/Codex integrations; run it from Git Bash on Windows (uname -s should start with MINGW/MSYS), not from inside WSL.' '检测到 WSL（Windows 上的 Linux 子系统）。本脚本配置的是 Windows 侧的 ZCode/Claude/Codex 集成：请在 Windows 的 Git Bash 中运行（uname -s 应以 MINGW/MSYS 开头），不要在 WSL 内执行。')"
+      exit 1
+    fi
+    ;;
+esac
+
 # native_path <path> — Windows mixed form (C:/Users/...) under MSYS; no-op elsewhere.
 # Mixed form keeps forward slashes, so path markers like scripts/session-start.mjs
 # stay greppable and node accepts the value unchanged.
