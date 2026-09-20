@@ -22,7 +22,7 @@
  * 2. Use stdin + pendingPrompt only when the rollout file is unavailable.
  */
 
-import { readFileSync } from "node:fs";
+import fs from "node:fs";
 import { join } from "node:path";
 
 const INJECTED_BLOCK_RE = /<openviking-context\b[^>]*>[\s\S]*?<\/openviking-context>/gi;
@@ -87,37 +87,73 @@ export function extractUnseenRolloutTurns(rolloutPath, lastKnownTurnId = null) {
   return readUnseenRolloutTurns(rolloutPath, lastKnownTurnId).turns;
 }
 
+// Long-running sessions grow their rollout into gigabytes; those Stop hooks
+// have seconds, not minutes. Scan backwards from the tail in windows and pull
+// in turn ids with a regex instead of parsing every line — full-file
+// readFileSync + per-line JSON.parse blew the hook timeout and silently
+// dropped captures (9.96 GB rollout = every Stop skipped).
+const ROLLOUT_WINDOW_BYTES = 8 * 1024 * 1024;
+const ROLLOUT_MAX_WINDOW_BYTES = 1024 * 1024 * 1024;
+const TURN_ID_RE = /"turnId"\s*:\s*"([^"]+)"/;
+
+function readRolloutSlice(fd, start, length) {
+  const buffer = Buffer.alloc(length);
+  const read = fs.readSync(fd, buffer, 0, length, start);
+  return buffer.toString("utf8");
+}
+
+function scanWindowForTurnId(lines, wanted) {
+  // Index of the line whose turnId equals `wanted`, -1 if absent, or null
+  // when the window edge cut a line short (caller widens and retries).
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length > 64 * 1024 * 1024) continue;
+    const match = TURN_ID_RE.exec(line);
+    if (match && match[1] === wanted) return i;
+  }
+  return lines.some((line) => line && !line.endsWith("}") && !line.endsWith("]")) ? null : -1;
+}
+
 function readUnseenRolloutTurns(rolloutPath, lastKnownTurnId = null) {
   if (!rolloutPath) return { available: false, turns: [] };
-  let raw;
+  let size = 0;
   try {
-    raw = readFileSync(rolloutPath, "utf8");
+    size = fs.statSync(rolloutPath).size;
   } catch {
     return { available: false, turns: [] };
   }
+  if (size === 0) return { available: true, turns: [] };
 
-  const lines = raw.trim().split("\n").filter(Boolean);
-  if (lines.length === 0) return { available: true, turns: [] };
-
-  // If we have a lastKnownTurnId, find its position and return everything after.
-  // If not, return only the last entry (first-time capture).
-  let startIndex = 0;
+  // Work backwards in growing windows; most Stops only need the last few MB.
+  let window = Math.min(ROLLOUT_WINDOW_BYTES, size);
+  let lines = null;
   if (lastKnownTurnId) {
-    const foundIndex = lines.findIndex((line) => {
-      try {
-        return JSON.parse(line).turnId === lastKnownTurnId;
-      } catch {
-        return false;
+    while (true) {
+      const start = Math.max(0, size - window);
+      const raw = readRolloutSlice(fs.openSync(rolloutPath, "r"), start, size - start);
+      const allLines = raw.split("\n").filter(Boolean);
+      const found = scanWindowForTurnId(allLines, lastKnownTurnId);
+      if (found === null && window < Math.min(ROLLOUT_MAX_WINDOW_BYTES, size)) {
+        window = Math.min(window * 4, ROLLOUT_MAX_WINDOW_BYTES, size);
+        continue;
       }
-    });
-    if (foundIndex >= 0) startIndex = foundIndex + 1;
+      // Found → everything after the cursor is unseen. Not found anywhere →
+      // the rollout rotated under us; treat the window as a first capture.
+      lines = found >= 0 ? allLines.slice(found + 1) : allLines;
+      break;
+    }
+  } else {
+    // No cursor → first-time capture takes the tail window; the earliest
+    // entries in a giant rollout are long-gone context anyway.
+    const start = Math.max(0, size - window);
+    const raw = readRolloutSlice(fs.openSync(rolloutPath, "r"), start, size - start);
+    lines = raw.split("\n").filter(Boolean);
   }
-  // No lastKnownTurnId → capture ALL entries (first-time capture should not
-  // lose prior turns). Previously only returned the last entry.
+  if (lines.length === 0) return { available: true, turns: [] };
 
   const turns = [];
   const seenUserKeys = new Set();
-  for (let i = startIndex; i < lines.length; i++) {
+  for (let i = 0; i < lines.length; i++) {
     let entry;
     try {
       entry = JSON.parse(lines[i]);
