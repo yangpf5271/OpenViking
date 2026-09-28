@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { addAgentMessages } from "../../memory-plugin-shared/lib/agent-hook-runtime.mjs";
 import {
   applyZcodeCaptureResult,
   buildZcodeCapturePlan,
@@ -71,6 +72,15 @@ test("oversized turns are truncated to captureMaxLength before they are sent", (
   const wider = buildZcodeCapturePlan(hashed, {}, { captureMaxLength: 24000 });
   assert.equal(wider.candidates[0].dedupKey, narrow.candidates[0].dedupKey);
   assert.equal(wider.payloads[0].content, long.trim());
+});
+
+test("Zcode filters the full turn before capping the payload", () => {
+  const turn = { role: "user", content: `Remember ${"x".repeat(100)} SECRET123`, turnId: "turn-001" };
+  const plan = buildZcodeCapturePlan([turn], {}, {
+    captureMaxLength: 64,
+    captureFilters: ["d/SECRET123/"],
+  });
+  assert.deepEqual(plan.payloads, []);
 });
 
 test("non-retryable failure keeps cursor, dedup, and pending prompt unchanged", () => {
@@ -180,21 +190,35 @@ test("repeated prompt text clears only after the latest matching user is acknowl
   assert.equal(complete.pendingPrompt, null);
 });
 
-test("peer id is stamped onto payloads only when provided", () => {
+test("peer id is stamped onto payloads only when provided", async () => {
+  // Stamping lives in addAgentMessages since the incremental-capture refactor:
+  // the capture plan stays peer-agnostic, the send call stamps when the caller
+  // resolved a peer for this workspace.
   const turns = [
     { role: "user", content: "real question", turnId: "turn-001" },
     { role: "assistant", content: "real answer", turnId: "turn-001" },
   ];
 
-  const withoutPeer = buildZcodeCapturePlan(turns, {});
-  assert.deepEqual(withoutPeer.payloads, [
+  const plan = buildZcodeCapturePlan(turns, {});
+  assert.deepEqual(plan.payloads, [
     { role: "user", content: "real question", turn_id: "turn-001" },
     { role: "assistant", content: "real answer", turn_id: "turn-001" },
   ]);
 
-  const withPeer = buildZcodeCapturePlan(turns, {}, {}, "github.com-acme-repo");
-  assert.deepEqual(withPeer.payloads, [
-    { role: "user", content: "real question", turn_id: "turn-001", peer_id: "github.com-acme-repo" },
-    { role: "assistant", content: "real answer", turn_id: "turn-001", peer_id: "github.com-acme-repo" },
-  ]);
+  let seenBodies = [];
+  const fetchJSON = async (_path, init) => {
+    seenBodies.push(JSON.parse(init.body));
+    return { ok: true, result: { sent: plan.payloads.length, queued: 0 } };
+  };
+  await addAgentMessages(fetchJSON, "ov-sess-x", plan.payloads, "github.com-acme-repo");
+  const stamped = seenBodies.flatMap((b) => b.messages);
+  assert.deepEqual(
+    stamped.map((m) => m.peer_id),
+    ["github.com-acme-repo", "github.com-acme-repo"],
+  );
+
+  seenBodies = [];
+  await addAgentMessages(fetchJSON, "ov-sess-x", buildZcodeCapturePlan(turns, {}).payloads);
+  const unstamped = seenBodies.flatMap((b) => b.messages);
+  assert.ok(unstamped.every((m) => m.peer_id === undefined));
 });

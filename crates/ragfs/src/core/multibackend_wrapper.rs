@@ -28,9 +28,9 @@ use super::filesystem::{
     relative_match_file, FileSystem,
 };
 use super::types::{
-    BackendRole, BackendSyncState, FileInfo, GlobEntry, GlobPage, GrepResult, ListSortBy,
-    OperationItemConfig, RedirectEntry, RedirectPolicy, SortOrder, SyncLogEntry, SyncOp, SyncType,
-    TreeEntry, WriteFlag,
+    BackendRole, BackendSyncState, FileInfo, GlobEntry, GlobPage, GrepOptions, GrepResult,
+    ListSortBy, OperationItemConfig, RedirectEntry, RedirectPolicy, SortOrder, SyncLogEntry,
+    SyncOp, SyncType, TreeEntry, WriteFlag,
 };
 use crate::core::glob::{
     compare_rel_paths, decode_offset_token, encode_offset_token, PreparedGlob,
@@ -1565,29 +1565,24 @@ impl FileSystem for MultiWriteWrappedFS {
         &self,
         path: &str,
         pattern: &str,
-        recursive: bool,
-        case_insensitive: bool,
-        node_limit: Option<usize>,
-        exclude_path: Option<&str>,
-        level_limit: Option<usize>,
+        options: GrepOptions<'_>,
     ) -> Result<GrepResult> {
         let inner = &self.inner;
         let path_owned = path.to_string();
         let pattern_owned = pattern.to_string();
-        let exclude_owned = exclude_path.map(|s| s.to_string());
+        let exclude_owned = options.exclude_path.map(str::to_string);
+        let options = GrepOptions {
+            exclude_path: exclude_owned.as_deref(),
+            ..options
+        };
+        let recursive = options.recursive;
+        let node_limit = options.node_limit;
+        let level_limit = options.level_limit;
 
         let mut result = inner
             .primary()
             .backend
-            .grep(
-                &path_owned,
-                &pattern_owned,
-                recursive,
-                case_insensitive,
-                node_limit,
-                exclude_owned.as_deref(),
-                level_limit,
-            )
+            .grep(&path_owned, &pattern_owned, options)
             .await?;
 
         // Filter out multi-write internal metadata files from grep results.
@@ -1620,7 +1615,16 @@ impl FileSystem for MultiWriteWrappedFS {
 
         if recursive && search_dir == path_owned {
             let redirect_entries = self
-                .tree_directory(&path_owned, true, None, level_limit, None, None, None)
+                .tree_directory(
+                    &path_owned,
+                    true,
+                    None,
+                    level_limit,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
                 .await?;
             for entry in redirect_entries {
                 if node_limit.is_some_and(|limit| result.count >= limit) {
@@ -1642,22 +1646,26 @@ impl FileSystem for MultiWriteWrappedFS {
                     .grep(
                         &entry.path,
                         &pattern_owned,
-                        false,
-                        case_insensitive,
-                        node_limit.map(|limit| limit.saturating_sub(result.count)),
-                        None,
-                        None,
+                        GrepOptions {
+                            recursive: false,
+                            node_limit: node_limit.map(|limit| limit.saturating_sub(result.count)),
+                            exclude_path: None,
+                            level_limit: None,
+                            ..options
+                        },
                     )
                     .await
                 {
                     Ok(found) => found,
                     Err(_) => continue,
                 };
-                for m in target_result.matches {
+                for mut m in target_result.matches {
                     if node_limit.is_some_and(|limit| result.count >= limit) {
                         break;
                     }
-                    result.add_match(rel_path.clone(), m.line, m.content);
+                    m.file = rel_path.clone();
+                    result.matches.push(m);
+                    result.count += 1;
                 }
             }
             return Ok(result);
@@ -1677,20 +1685,23 @@ impl FileSystem for MultiWriteWrappedFS {
                             .grep(
                                 &redirect_path,
                                 &pattern_owned,
-                                false,
-                                case_insensitive,
-                                node_limit,
-                                None,
-                                None,
+                                GrepOptions {
+                                    recursive: false,
+                                    exclude_path: None,
+                                    level_limit: None,
+                                    ..options
+                                },
                             )
                             .await
                         {
                             let rel_path = relative_match_file(&path_owned, &redirect_path);
-                            for m in target_result.matches {
+                            for mut m in target_result.matches {
                                 if node_limit.is_some_and(|limit| result.count >= limit) {
                                     break;
                                 }
-                                result.add_match(rel_path.clone(), m.line, m.content);
+                                m.file = rel_path.clone();
+                                result.matches.push(m);
+                                result.count += 1;
                             }
                         }
                     }
@@ -1732,7 +1743,16 @@ impl FileSystem for MultiWriteWrappedFS {
         }
 
         let entries = self
-            .tree_directory(path, show_hidden, None, level_limit, None, None, None)
+            .tree_directory(
+                path,
+                show_hidden,
+                None,
+                level_limit,
+                None,
+                None,
+                None,
+                false,
+            )
             .await?;
 
         let mut matched = Vec::new();
@@ -1780,6 +1800,7 @@ impl FileSystem for MultiWriteWrappedFS {
         offset: Option<usize>,
         sort_by: Option<ListSortBy>,
         sort_order: Option<SortOrder>,
+        directories_only: bool,
     ) -> Result<Vec<TreeEntry>> {
         let base = normalize_prefix_path(path);
         if sort_by.is_some() {
@@ -1793,6 +1814,7 @@ impl FileSystem for MultiWriteWrappedFS {
                 level_limit,
                 sort_by,
                 sort_order,
+                directories_only,
                 &mut entries,
             )
             .await?;
@@ -1803,12 +1825,21 @@ impl FileSystem for MultiWriteWrappedFS {
             .inner
             .primary()
             .backend
-            .tree_directory(path, show_hidden, None, level_limit, None, None, None)
+            .tree_directory(
+                path,
+                show_hidden,
+                None,
+                level_limit,
+                None,
+                None,
+                None,
+                directories_only,
+            )
             .await?;
 
         entries.retain(|e| {
             let name = file_name(&e.path);
-            !MULTIWRITE_INTERNAL_NAMES.contains(&name)
+            !MULTIWRITE_INTERNAL_NAMES.contains(&name) && (!directories_only || e.info.is_dir)
         });
 
         if self.inner.redirects.is_empty() {
@@ -1892,6 +1923,9 @@ impl FileSystem for MultiWriteWrappedFS {
             }
         }
 
+        if directories_only {
+            entries.retain(|entry| entry.info.is_dir);
+        }
         Ok(paginate_entries(entries, offset, node_limit))
     }
 }

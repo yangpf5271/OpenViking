@@ -35,7 +35,7 @@ use super::plugin::ServicePlugin;
 use super::stats::{FilesystemStats, StatsCollector};
 use super::stats_wrapper::StatsWrappedFS;
 use super::types::{
-    BackendsConfig, FileInfo, GlobPage, GrepResult, PluginConfig, TreeEntry, WriteFlag,
+    BackendsConfig, FileInfo, GlobPage, GrepOptions, GrepResult, PluginConfig, TreeEntry, WriteFlag,
 };
 #[cfg(feature = "cache")]
 use crate::cache::{CacheNamespace, CachePolicy, CacheTraversalMode, CachedFileSystem};
@@ -1095,20 +1095,15 @@ impl FileSystem for MountableFS {
         &self,
         path: &str,
         pattern: &str,
-        recursive: bool,
-        case_insensitive: bool,
-        node_limit: Option<usize>,
-        exclude_path: Option<&str>,
-        level_limit: Option<usize>,
+        options: GrepOptions<'_>,
     ) -> Result<GrepResult> {
-        // Route grep to the mounted plugin so plugin-specific fast paths (e.g. localfs + rg)
-        // can take effect. If a plugin doesn't override grep, it will fall back to the trait
-        // default implementation on that plugin instance (still correct, just slower).
+        // Route grep to the mounted plugin so plugin-specific implementations can take effect.
+        // Plugins without an override use the trait's default implementation.
         let (mount_info, rel_path) = self.find_mount(path).await?;
 
         // Exclude path only applies when it resolves to the same mount point; otherwise it
         // should not affect searching under `path`.
-        let exclude_rel: Option<String> = match exclude_path {
+        let exclude_rel: Option<String> = match options.exclude_path {
             None => None,
             Some(excl_abs) => match self.find_mount(excl_abs).await {
                 Ok((exclude_mount, excl_rel)) => {
@@ -1127,11 +1122,10 @@ impl FileSystem for MountableFS {
             .grep(
                 &rel_path,
                 pattern,
-                recursive,
-                case_insensitive,
-                node_limit,
-                exclude_rel.as_deref(),
-                level_limit,
+                GrepOptions {
+                    exclude_path: exclude_rel.as_deref(),
+                    ..options
+                },
             )
             .await?;
 
@@ -1155,6 +1149,7 @@ impl FileSystem for MountableFS {
         offset: Option<usize>,
         sort_by: Option<crate::core::ListSortBy>,
         sort_order: Option<crate::core::SortOrder>,
+        directories_only: bool,
     ) -> Result<Vec<TreeEntry>> {
         let (mount_info, rel_path) = self.find_mount(path).await?;
 
@@ -1174,6 +1169,7 @@ impl FileSystem for MountableFS {
                 None,
                 sort_by,
                 sort_order,
+                directories_only,
             )
             .await?;
 
@@ -1193,6 +1189,7 @@ impl FileSystem for MountableFS {
                 .rsplit('/')
                 .next()
                 .map_or(true, |name| !is_hidden_internal_name(name))
+                && (!directories_only || e.info.is_dir)
         });
 
         Ok(paginate_entries(entries, offset, node_limit))
@@ -1391,11 +1388,7 @@ mod tests {
             &self,
             path: &str,
             pattern: &str,
-            _recursive: bool,
-            _case_insensitive: bool,
-            _node_limit: Option<usize>,
-            _exclude_path: Option<&str>,
-            _level_limit: Option<usize>,
+            _options: GrepOptions<'_>,
         ) -> Result<GrepResult> {
             let mut out = GrepResult::new();
             // Encode the received rel_path into the match so the test can assert routing worked.
@@ -1412,6 +1405,7 @@ mod tests {
             _offset: Option<usize>,
             _sort_by: Option<crate::core::ListSortBy>,
             _sort_order: Option<crate::core::SortOrder>,
+            _directories_only: bool,
         ) -> Result<Vec<TreeEntry>> {
             Ok(self.tree_entries.clone())
         }
@@ -2214,7 +2208,7 @@ mod tests {
         let mfs = mounted_mock("mock", "/mock").await;
 
         let result = mfs
-            .grep("/mock/a.txt", "foo", false, false, None, None, None)
+            .grep("/mock/a.txt", "foo", GrepOptions::default())
             .await
             .unwrap();
 
@@ -2284,7 +2278,16 @@ mod tests {
     async fn test_tree_directory_no_mount_returns_error() {
         let mfs = MountableFS::new();
         let result = mfs
-            .tree_directory("/nonexistent/subdir", false, None, None, None, None, None)
+            .tree_directory(
+                "/nonexistent/subdir",
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
             .await;
         assert!(result.is_err());
     }
@@ -2305,7 +2308,7 @@ mod tests {
         mfs.mount(test_config("rewrite", "/rewrite")).await.unwrap();
 
         let result = mfs
-            .tree_directory("/rewrite/sub", false, None, None, None, None, None)
+            .tree_directory("/rewrite/sub", false, None, None, None, None, None, false)
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
@@ -2326,7 +2329,16 @@ mod tests {
             .unwrap();
 
         let result = mfs
-            .tree_directory("/local/test_account/a", false, None, None, None, None, None)
+            .tree_directory(
+                "/local/test_account/a",
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(result.len(), 1);

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::{
-    FileInfo, FileSystem, FsOperation, GlobPage, GrepResult, OperationTimer, Result,
+    FileInfo, FileSystem, FsOperation, GlobPage, GrepOptions, GrepResult, OperationTimer, Result,
     StatsCollector, TreeEntry, WriteFlag,
 };
 
@@ -176,25 +176,10 @@ impl FileSystem for StatsWrappedFS {
         &self,
         path: &str,
         pattern: &str,
-        recursive: bool,
-        case_insensitive: bool,
-        node_limit: Option<usize>,
-        exclude_path: Option<&str>,
-        level_limit: Option<usize>,
+        options: GrepOptions<'_>,
     ) -> Result<GrepResult> {
         let timer = OperationTimer::start(FsOperation::Grep, Arc::clone(&self.stats));
-        let result = self
-            .inner
-            .grep(
-                path,
-                pattern,
-                recursive,
-                case_insensitive,
-                node_limit,
-                exclude_path,
-                level_limit,
-            )
-            .await;
+        let result = self.inner.grep(path, pattern, options).await;
         timer.finish(result.is_ok()).await;
         result
     }
@@ -208,6 +193,7 @@ impl FileSystem for StatsWrappedFS {
         offset: Option<usize>,
         sort_by: Option<crate::core::ListSortBy>,
         sort_order: Option<crate::core::SortOrder>,
+        directories_only: bool,
     ) -> Result<Vec<TreeEntry>> {
         let timer = OperationTimer::start(FsOperation::TreeDir, Arc::clone(&self.stats));
         let result = self
@@ -220,6 +206,7 @@ impl FileSystem for StatsWrappedFS {
                 offset,
                 sort_by,
                 sort_order,
+                directories_only,
             )
             .await;
         timer.finish(result.is_ok()).await;
