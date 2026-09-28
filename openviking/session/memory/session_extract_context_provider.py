@@ -238,9 +238,12 @@ The system automatically generates URIs based on memory_type and fields. Just pr
 {resource_uri_handling}
 
 ## Self and Peer Memory
-When a memory item describes the current user, omit peer_id.
-When a memory item describes a peer, set peer_id to one of the peer_id values allowed by
-the output schema. Do not invent peer_id values.
+When a memory item describes the current user as a person — identity, personal traits,
+cross-project preferences, or shared infrastructure such as a company VPN or shared CI —
+omit peer_id.
+When a memory item describes a specific project, product, repository, or the user's work
+on it — including the user's own current project — set peer_id to one of the peer_id
+values allowed by the output schema. Do not invent peer_id values.
 For memory items that carry a message-range field, the system derives self/peer targets from that range.
 Message role is authoritative for newly extracted facts: attribute each fact to the speaker whose
 message states it, and follow each enabled memory type's own schema rules for which role its content

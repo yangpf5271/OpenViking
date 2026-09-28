@@ -7,6 +7,9 @@ description: |
   similarity. Merge only explicit aliases of the same object. Distinct people, pets,
   works, artworks, products, possessions, places, events, and activities remain separate
   even when they share a theme, owner, participants, appearance, or use.
+  An entity tied to a project the user is actively working on — its own repository,
+  product, or project, including the user's current project — carries that session's
+  peer_id and is never written to the user-level space.
 directory: "viking://user/{{ user_space }}/memories/entities"
 filename_template: "{{ category|lower }}/{{ name|lower }}.md"
 enabled: true
