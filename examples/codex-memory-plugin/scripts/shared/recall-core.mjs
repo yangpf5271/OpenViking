@@ -710,6 +710,16 @@ async function recallForPeer(fetchJSON, cfg, query, options = {}) {
   const trimmed = String(query || "").trim();
   if (!trimmed) return emptyRecall("no_results");
 
+  // A peer-scoped recall without a peer identity widens server-side to every
+  // peer subtree: with no X-OpenViking-Actor-Peer header to attach, the
+  // context face treats `peer_scope: "actor"` as unscoped and returns other
+  // projects' directory entries. No derived peer (non-git cwd, no registry,
+  // no explicit peer) means there is no project memory to recall — skip.
+  if (cfg.recallPeerScope === "actor" && !actorPeerId) {
+    log("recall_skipped_no_peer", { recallPeerScope: "actor" });
+    return emptyRecall("no_peer");
+  }
+
   // Assembly happens server-side when the deployment offers the context face;
   // older servers fall through to /recall, then to raw find.
   const serverBlock = await buildServerAssembledBlock(fetchJSON, cfg, trimmed, {

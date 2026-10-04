@@ -640,3 +640,39 @@ for (const textLength of [20, 500]) {
     assert.equal(recalled.hintCount, citedUris.length - visibleContent.length);
   });
 }
+
+test("actor-scope recall is skipped when no peer identity can be derived", async () => {
+  // headless cwd without git/registry/explicit peer derives no actor peer; a
+  // peer_scope=actor request without that identity widens server-side to every
+  // peer subtree — it must be skipped, not sent.
+  const calls = [];
+  const legacyCachePath = await tempPath("context-face-no-peer.json");
+  const block = await buildRecallBlock(async (path, init) => {
+    calls.push({ path, body: init?.body ? JSON.parse(init.body) : null });
+    return { ok: true, result: {} };
+  }, { recallPeerScope: "actor", recallMaxTokens: 1600 }, "hello world", { legacyCachePath });
+  assert.equal(block, null);
+  assert.equal(calls.length, 0, "no recall request may leave the process");
+});
+
+test("actor-scope recall proceeds and stamps peer_scope when a peer exists", async () => {
+  const calls = [];
+  const legacyCachePath = await tempPath("context-face-with-peer.json");
+  const block = await buildRecallBlock(async (path, init) => {
+    calls.push({ path, body: init?.body ? JSON.parse(init.body) : null });
+    return {
+      ok: true,
+      result: {
+        rendered: '<memory uri="viking://user/default/memories/a.md" type="events">body</memory>',
+        entries: [{ uri: "viking://user/default/memories/a.md" }],
+        stats: { used_tokens: 42, rewrite: "off" },
+      },
+    };
+  }, { recallPeerScope: "actor", recallMaxTokens: 1600 }, "hello world", {
+    actorPeerId: "github.com-acme-repo",
+    legacyCachePath,
+  });
+  assert.ok(block);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.peer_scope, "actor");
+});
