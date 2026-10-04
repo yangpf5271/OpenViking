@@ -159,6 +159,10 @@ export const KNOBS = [
   { name: "writePathAsync", type: "bool", default: true, env: "OPENVIKING_WRITE_PATH_ASYNC", capability: "capture" },
 
   // ── session lifecycle ─────────────────────────────────────────────────
+  // "skip" makes headless sessions (Claude Code transcripts stamped
+  // entrypoint:"sdk-cli", i.e. `claude -p`) run no hooks at all — no recall
+  // injection, no capture. Interactive sessions are unaffected.
+  { name: "headlessMode", type: "enum", values: ["skip", "normal"], default: "skip", env: "OPENVIKING_HEADLESS_MODE", workspace: "session.headless_mode", capability: "session" },
   { name: "noAutoInject", type: "bool", default: false, env: "OPENVIKING_NO_AUTO_INJECT", capability: "session" },
   { name: "profileTokenBudget", type: "int", default: 10000, min: 500, max: 50000, env: "OPENVIKING_PROFILE_TOKEN_BUDGET", aliases: ["profileBudget"], capability: "session" },
   { name: "resumeContextBudget", type: "int", default: 32000, min: 1024, max: 128000, env: "OPENVIKING_RESUME_CONTEXT_BUDGET", capability: "session" },

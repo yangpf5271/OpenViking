@@ -474,3 +474,58 @@ test("captured messages carry the effective peer in the body, and none when peer
     [{ role: "user", content: "c" }],
   ]);
 });
+
+test("headless sessions (entrypoint sdk-cli) skip every stage when headlessMode is skip", async () => {
+  const transcript = join(mkdtempSync(join(tmpdir(), "ov-headless-")), "t.jsonl");
+  writeFileSync(transcript, '{"entrypoint":"sdk-cli","session_id":"s1"}\n{"entrypoint":"sdk-cli"}\n');
+  const raw = JSON.stringify({ session_id: "s1", transcript_path: transcript });
+  let ran = false;
+  const { seen, value } = await stageRun({ raw, cfg: { headlessMode: "skip", autoRecall: true } }, () => { ran = true; });
+
+  assert.equal(value, undefined);
+  assert.equal(ran, false, "headless sessions must not reach the callback");
+  assert.deepEqual(seen.skips, ["headless"]);
+});
+
+test("interactive sessions (entrypoint cli) run as usual", async () => {
+  const transcript = join(mkdtempSync(join(tmpdir(), "ov-interactive-")), "t.jsonl");
+  writeFileSync(transcript, '{"entrypoint":"cli","session_id":"s1"}\n');
+  let ran = false;
+  const { seen } = await stageRun(
+    { raw: JSON.stringify({ session_id: "s1", transcript_path: transcript }), cfg: { autoRecall: true } },
+    () => { ran = true; },
+  );
+  assert.equal(ran, true);
+  assert.deepEqual(seen.skips, []);
+});
+
+test("headlessMode normal restores headless recall and capture", async () => {
+  const transcript = join(mkdtempSync(join(tmpdir(), "ov-headless-normal-")), "t.jsonl");
+  writeFileSync(transcript, '{"entrypoint":"sdk-cli"}\n');
+  let ran = false;
+  const { seen } = await stageRun(
+    { raw: JSON.stringify({ session_id: "s1", transcript_path: transcript }), cfg: { headlessMode: "normal", autoRecall: true } },
+    () => { ran = true; },
+  );
+  assert.equal(ran, true);
+  assert.deepEqual(seen.skips, []);
+});
+
+test("a missing or unreadable transcript fails open (never skips interactive)", async () => {
+  let ran = false;
+  const { seen } = await stageRun(
+    { raw: JSON.stringify({ session_id: "s1" }), cfg: { autoRecall: true } },
+    () => { ran = true; },
+  );
+  assert.equal(ran, true, "no transcript_path — cannot tell, so run");
+  assert.deepEqual(seen.skips, []);
+
+  const missing = join(mkdtempSync(join(tmpdir(), "ov-missing-")), "absent.jsonl");
+  ran = false;
+  const second = await stageRun(
+    { raw: JSON.stringify({ session_id: "s1", transcript_path: missing }), cfg: { autoRecall: true } },
+    () => { ran = true; },
+  );
+  assert.equal(ran, true, "unreadable transcript fails open");
+  assert.deepEqual(second.seen.skips, []);
+});

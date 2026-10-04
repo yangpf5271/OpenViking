@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { closeSync, openSync, readSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -313,6 +314,50 @@ export function shouldBypassAgent(cfg, input = {}) {
  * then `maybeDetach` — stays in the entry. A worker has to be spawned before
  * stdin is consumed, and its response is the host's own.
  */
+
+/** Probe size for the transcript head: entrypoint sits on the first records. */
+const ENTRYPOINT_PROBE_BYTES = 65536;
+
+/**
+ * Read the session mode a Claude transcript was started with. Claude Code
+ * stamps every transcript record with `entrypoint` — `"sdk-cli"` for headless
+ * `claude -p` runs, `"cli"` for interactive sessions. Reads only the file head
+ * (rollouts reach GB sizes); "" when the file is unreadable or carries no
+ * entrypoint — callers treat "" as "not headless", never as a mode signal.
+ */
+export function detectEntrypoint(transcriptPath) {
+  const path = String(transcriptPath || "").trim();
+  if (!path) return "";
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(ENTRYPOINT_PROBE_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    if (n <= 0) return "";
+    const head = buf.toString("utf8", 0, n);
+    for (const line of head.split("\n")) {
+      const match = line.match(/"entrypoint"\s*:\s*"([^"]+)"/);
+      if (match) return match[1];
+    }
+    return "";
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * True when `headlessMode: "skip"` (the default) and the transcript says this
+ * session was started headless (`claude -p`). Fails open: an unreadable or
+ * entrypoint-less transcript never skips, so interactive sessions keep their
+ * recall regardless of what the probe could read.
+ */
+export function shouldSkipHeadless(cfg, payload = {}) {
+  if (cfg.headlessMode !== "skip") return false;
+  return detectEntrypoint(payload.transcript_path || payload.transcriptPath || "") === "sdk-cli";
+}
+
 export async function runHookStage({
   clientId,
   loadConfig = (cwd) => loadAgentHookConfig(clientId, cwd),
@@ -365,6 +410,11 @@ export async function runHookStage({
   }
   if (bypass && bypass(cfg, stage)) {
     onSkip("bypass", stage);
+    emit();
+    return undefined;
+  }
+  if (shouldSkipHeadless(cfg, payload)) {
+    onSkip("headless", stage);
     emit();
     return undefined;
   }
