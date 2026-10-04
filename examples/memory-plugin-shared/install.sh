@@ -2219,7 +2219,53 @@ agent_remove_trae_cli_configs() { # agent_remove_trae_cli_configs <hooks> <traec
   mv "$tmp" "$config_path"
 }
 
+# ---------------------------------------------------------------------------
+# Cross-tool skills: stage the always-useful OpenViking skills into
+# ~/.agents/skills — the shared directory Codex, Cursor, Gemini CLI, Copilot,
+# and ZCode read natively (Claude Code keeps its own plugin copy). These two
+# carry the judgment knowledge the MCP tool descriptions do not: when to
+# search memories at all and how to pick between the retrieval surfaces.
+# ---------------------------------------------------------------------------
+
+install_agent_skills() {
+  local src_base=""
+  if [ -d "$MKT_DIR/skills" ]; then
+    src_base="$MKT_DIR/skills"
+  elif [ -d "$CHECKOUT_DIR/examples/skills" ]; then
+    src_base="$CHECKOUT_DIR/examples/skills"
+  elif [ -d "$SRC_ROOT/examples/skills" ]; then
+    src_base="$SRC_ROOT/examples/skills"
+  else
+    warn "$(t 'OpenViking skills source not found; skipping the ~/.agents/skills sync.' '未找到 OpenViking 技能源，跳过 ~/.agents/skills 同步。')"
+    return 0
+  fi
+
+  mkdir -p "$HOME/.agents/skills"
+  local staged="" name src tmp
+  for name in openviking-memory ov-experience-memory; do
+    src="$src_base/$name"
+    [ -d "$src" ] || continue
+    tmp="$HOME/.agents/skills/$name.tmp.$$"
+    rm -rf "$tmp"
+    cp -R "$src" "$tmp" || continue
+    rm -rf "$HOME/.agents/skills/$name"
+    mv "$tmp" "$HOME/.agents/skills/$name"
+    staged="$staged $name"
+  done
+  if [ -n "$staged" ]; then
+    info "$(t 'OpenViking skills staged into ~/.agents/skills:' 'OpenViking 技能已同步到 ~/.agents/skills：')$staged"
+  fi
+}
+
 uninstall_agent_integrations() {
+  # The ~/.agents/skills stage is ours — remove exactly what we staged.
+  local staged_name
+  for staged_name in openviking-memory ov-experience-memory; do
+    if [ -d "$HOME/.agents/skills/$staged_name" ]; then
+      rm -rf "$HOME/.agents/skills/$staged_name"
+      info "$(t "Removed the staged skill ~/.agents/skills/$staged_name." "已移除同步的技能 ~/.agents/skills/$staged_name。")"
+    fi
+  done
   if contains_harness cursor; then
     agent_remove_json_configs "$HOME/.cursor/hooks.json" "$(cursor_mcp_path)"
     rm -f "$HOME/.cursor/rules/openviking-memory.mdc"
@@ -3016,6 +3062,7 @@ if contains_harness kimicode; then install_kimicode; fi
 if contains_harness opencode; then install_opencode; fi
 if contains_harness pi; then install_pi; fi
 if contains_harness dsh; then install_dsh; fi
+install_agent_skills
 validate_install
 
 heading "$(t 'Done' '完成')"
