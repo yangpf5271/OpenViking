@@ -237,6 +237,7 @@ Options:
   --user ID          Optional OpenViking user.
   --statusline       Register the Claude Code statusline without asking.
   --no-statusline    Skip the statusline prompt.
+  --skip-cli         Do not auto-install the OpenViking CLI (ov) when it is missing.
   --uninstall        Remove Cursor/TRAE/TRAE CN/ZCode/Kimi Code integration files and config,
                      plus any legacy TraeCode CLI hook config.
                      For Codex-format plugins, use the client's plugin uninstall command.
@@ -259,6 +260,7 @@ while [ "$#" -gt 0 ]; do
     --user) USER_ARG="${2-}"; shift 2 ;;
     --statusline) STATUSLINE_ARG="yes"; shift ;;
     --no-statusline) STATUSLINE_ARG="no"; shift ;;
+    --skip-cli) SKIP_CLI=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     --yes|-y) YES=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -2227,6 +2229,43 @@ agent_remove_trae_cli_configs() { # agent_remove_trae_cli_configs <hooks> <traec
 # search memories at all and how to pick between the retrieval surfaces.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# OpenViking CLI (ov): auto-install on first use so the memory tooling has a
+# CLI companion. Skipped with --skip-cli; an existing ov is never upgraded
+# automatically (the running config may depend on its version).
+# ---------------------------------------------------------------------------
+
+install_cli() {
+  if [ "${SKIP_CLI:-0}" = "1" ]; then
+    info "$(t 'CLI auto-install skipped (--skip-cli).' 'CLI 自动安装已跳过（--skip-cli）。')"
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    warn "$(t "npm not found; skipped the CLI. Install it later with: npm install -g @openviking/cli" "未找到 npm，跳过 CLI 安装。之后可运行：npm install -g @openviking/cli")"
+    return 0
+  fi
+  if command -v ov >/dev/null 2>&1; then
+    local v
+    v="$(ov --version 2>/dev/null | head -n 1 || true)"
+    info "$(t "ov is already installed${v:+ ($v)}; upgrade with: npm install -g @openviking/cli@latest" "已检测到 ov${v:+（$v）}，跳过自动安装；升级命令：npm install -g @openviking/cli@latest")"
+    return 0
+  fi
+  heading "$(t 'CLI (ov)' 'CLI（ov）')"
+  info "$(t 'Installing the OpenViking CLI from npm...' '正在从 npm 安装 OpenViking CLI...')"
+  if npm install -g "${OPENVIKING_CLI_PACKAGE:-@openviking/cli}@latest" --ignore-scripts --no-audit --no-fund; then
+    hash -r 2>/dev/null || true
+    local v
+    v="$(ov --version 2>/dev/null | head -n 1 || true)"
+    if [ -n "$v" ]; then
+      info "$(t 'CLI installed:' 'CLI 已安装：') ov ($v)"
+    else
+      warn "$(t 'The CLI was installed but ov is not runnable; check that the npm global bin directory is on PATH.' 'CLI 已安装但 ov 无法运行；请确认 npm 全局 bin 目录在 PATH 中。')"
+    fi
+  else
+    warn "$(t "npm could not install the CLI. Try again later with: npm install -g @openviking/cli" "npm 安装 CLI 失败。之后可重试：npm install -g @openviking/cli")"
+  fi
+}
+
 install_agent_skills() {
   local src_base=""
   if [ -d "$MKT_DIR/skills" ]; then
@@ -3062,6 +3101,7 @@ if contains_harness kimicode; then install_kimicode; fi
 if contains_harness opencode; then install_opencode; fi
 if contains_harness pi; then install_pi; fi
 if contains_harness dsh; then install_dsh; fi
+install_cli
 install_agent_skills
 validate_install
 
