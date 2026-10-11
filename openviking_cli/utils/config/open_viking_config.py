@@ -35,6 +35,7 @@ from .ingest_config import IngestConfig
 from .log_config import LogConfig
 from .memory_config import MemoryConfig
 from .oauth_config import OAuthConfig
+from .openviking_gateway_config import OpenVikingGatewayConfig
 from .parser_config import (
     AnydocConfig,
     AudioConfig,
@@ -222,7 +223,7 @@ class OpenVikingConfig(BaseModel):
 
     retrieval: RetrievalConfig = Field(
         default_factory=RetrievalConfig,
-        description="Retrieval ranking configuration",
+        description="Retrieval behavior configuration",
     )
 
     grep: GrepConfig = Field(
@@ -316,6 +317,8 @@ class OpenVikingConfig(BaseModel):
         default_factory=ConnectorConfig,
         description="External Connector service configuration for data import",
     )
+
+    gateway: OpenVikingGatewayConfig = Field(default_factory=OpenVikingGatewayConfig)
 
     enable_watch_scheduler: bool = Field(
         default=True,
