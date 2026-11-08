@@ -43,7 +43,7 @@ import {
   TableRow,
 } from '#/components/ui/table'
 import { useAppConnection } from '#/hooks/use-app-connection'
-import { ovClient } from '#/lib/ov-client'
+import { getOvResult, ovClient } from '#/lib/ov-client'
 import { postResources } from '#/gen/ov-client'
 import { commitSession } from '#/lib/sessions/api'
 import { cn } from '#/lib/utils'
@@ -76,8 +76,6 @@ const TASK_TYPE_OPTIONS: Exclude<TaskTypeFilter, 'all'>[] = [
   'connector_import',
   'admin_reindex',
   'snapshot_restore_reindex',
-  'legacy_migration',
-  'legacy_cleanup',
 ]
 const TASK_STATUS_OPTIONS: Exclude<TaskStatusFilter, 'all'>[] = [
   'pending',
@@ -165,12 +163,14 @@ function TasksRoute() {
         resourceUri.startsWith('http://') ||
         resourceUri.startsWith('https://')
       ) {
-        const res = await postResources({
-          body: {
-            url: resourceUri,
-            reason: `Re-queued task: ${task.task_id}`,
-          } as any,
-        })
+        const res = await getOvResult(
+          postResources({
+            body: {
+              path: resourceUri,
+              reason: `Re-queued task: ${task.task_id}`,
+            },
+          }),
+        )
         return { res, task }
       }
 
@@ -508,8 +508,6 @@ function TasksRoute() {
       'snapshot_restore_reindex',
       'add_skill',
       'connector_import',
-      'legacy_migration',
-      'legacy_cleanup',
     ]
 
     const typeCounts: Record<string, number> = {}
@@ -642,8 +640,12 @@ function TasksRoute() {
               {kpiData.avgDurationSec === undefined
                 ? '-'
                 : kpiData.avgDurationSec < 1
-                  ? `${(kpiData.avgDurationSec * 1000).toFixed(0)}ms`
-                  : `${kpiData.avgDurationSec.toFixed(1)}s`}
+                  ? t('studio:duration.milliseconds', {
+                      value: (kpiData.avgDurationSec * 1000).toFixed(0),
+                    })
+                  : t('studio:duration.seconds', {
+                      value: kpiData.avgDurationSec.toFixed(1),
+                    })}
             </span>
           </div>
           <p className="text-[11px] text-muted-foreground truncate">
@@ -838,7 +840,9 @@ function TasksRoute() {
                   <TableHead>{t('table.resource')}</TableHead>
                   <TableHead>{t('labels.queuePipeline')}</TableHead>
                   <TableHead>{t('table.status')}</TableHead>
-                  <TableHead title={t('labels.processingDurationHelp')}>{t('labels.timing')}</TableHead>
+                  <TableHead title={t('labels.processingDurationHelp')}>
+                    {t('labels.timing')}
+                  </TableHead>
                   <TableHead className="text-right">
                     {t('table.createdAt')}
                   </TableHead>
@@ -907,12 +911,19 @@ function TasksRoute() {
                       <TableCell>{renderStatus(task)}</TableCell>
                       <TableCell className="whitespace-nowrap text-xs tabular-nums">
                         <div>
-                          {t('labels.processingDuration')}: <span>{task.status === 'pending' && (task.processing_seconds == null || task.processing_seconds === 0)
-                            ? t('labels.processingNotStarted')
-                            : formatTaskProcessingDuration(task) ?? t('labels.timingUnavailable')}</span>
+                          {t('labels.processingDuration')}:{' '}
+                          <span>
+                            {task.status === 'pending' &&
+                            (task.processing_seconds == null ||
+                              task.processing_seconds === 0)
+                              ? t('labels.processingNotStarted')
+                              : (formatTaskProcessingDuration(task) ??
+                                t('labels.timingUnavailable'))}
+                          </span>
                         </div>
                         <div className="text-muted-foreground">
-                          {t('labels.totalDuration')}: <span>{formatTaskDuration(task)}</span>
+                          {t('labels.totalDuration')}:{' '}
+                          <span>{formatTaskDuration(task)}</span>
                         </div>
                       </TableCell>
                       <TableCell className="whitespace-nowrap text-right text-muted-foreground">

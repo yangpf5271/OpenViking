@@ -16,6 +16,7 @@ from openviking.service.memory_compile import (
     _memory_type_from_target,
     _peer_id_from_memory_uri,
 )
+from openviking.service.task_store import PersistentTaskStore
 from openviking.service.task_tracker import TaskStatus, TaskTracker
 from openviking.service.task_work_index import get_task_context
 from openviking.session.memory.consolidation_context_provider import (
@@ -39,6 +40,7 @@ from openviking.session.memory.merge_op import FieldType, MergeOp
 from openviking.session.memory.utils.memory_file_utils import MemoryFileUtils
 from openviking_cli.exceptions import InvalidArgumentError, NotFoundError
 from openviking_cli.session.user_id import UserIdentifier
+from tests.test_task_tracker import _FakeAgfs
 
 
 def _ctx(user_id: str = "u1") -> RequestContext:
@@ -168,14 +170,7 @@ async def test_root_compile_creates_one_task_and_one_loop(monkeypatch, language_
     language_config.output_language_override = "en"
     vlm = SimpleNamespace(model="test", get_completion_async=AsyncMock(return_value="sdk.commit()"))
     language_config.vlm = SimpleNamespace(get_vlm_instance=lambda: vlm)
-    store = SimpleNamespace(
-        create=AsyncMock(),
-        update=AsyncMock(),
-        get=AsyncMock(return_value=None),
-        list=AsyncMock(return_value=[]),
-        delete=AsyncMock(),
-    )
-    tracker = TaskTracker(store)
+    tracker = TaskTracker(PersistentTaskStore(_FakeAgfs()))
     monkeypatch.setattr("openviking.service.memory_compile.get_task_tracker", lambda: tracker)
     uris = [
         f"{target}/entities/person/alice.md",
@@ -204,7 +199,10 @@ async def test_root_compile_creates_one_task_and_one_loop(monkeypatch, language_
         ),
     )
     service = SimpleNamespace(
-        ensure_write_access=AsyncMock(), stat=fs.stat, _ensure_initialized=lambda: fs
+        ensure_write_access=AsyncMock(),
+        stat=fs.stat,
+        _ensure_initialized=lambda: fs,
+        finalize_compile_directories=AsyncMock(),
     )
     apply = AsyncMock(return_value=MemoryUpdateResult())
     monkeypatch.setattr("openviking.service.memory_compile.MemoryUpdater.apply_operations", apply)
@@ -216,7 +214,8 @@ async def test_root_compile_creates_one_task_and_one_loop(monkeypatch, language_
     await asyncio.gather(*list(runner._running))
     final = await tracker.get(accepted.task_id, account_id="acc", user_id="u1")
 
-    store.create.assert_awaited_once()
+    service.finalize_compile_directories.assert_awaited_once_with(target, _ctx())
+
     vlm.get_completion_async.assert_awaited_once()
     fs.glob.assert_awaited_once()
     assert fs.glob.await_args.kwargs["uri"] == target
@@ -235,7 +234,11 @@ async def test_root_compile_creates_one_task_and_one_loop(monkeypatch, language_
     for name in ("entities", "preferences", "profile"):
         assert name in prompt
     assert "create_events" not in prompt
-    assert not tracker.has_work(accepted.task_id)
+    assert not await tracker.has_work(
+        accepted.task_id,
+        account_id="acc",
+        user_id="u1",
+    )
 
 
 @pytest.mark.asyncio
@@ -736,14 +739,7 @@ async def test_compile_task_apply_outcomes(
     language_config.output_language_override = "en"
     language_config.vlm = SimpleNamespace(get_vlm_instance=lambda: SimpleNamespace(model="test"))
     ctx = _ctx()
-    store = SimpleNamespace(
-        create=AsyncMock(),
-        update=AsyncMock(),
-        get=AsyncMock(return_value=None),
-        list=AsyncMock(return_value=[]),
-        delete=AsyncMock(),
-    )
-    tracker = TaskTracker(store)
+    tracker = TaskTracker(PersistentTaskStore(_FakeAgfs()))
     task = await tracker.create("compile", account_id=ctx.account_id, user_id=ctx.user.user_id)
     monkeypatch.setattr("openviking.service.memory_compile.get_task_tracker", lambda: tracker)
     monkeypatch.setattr(
@@ -771,7 +767,13 @@ async def test_compile_task_apply_outcomes(
         apply_result.add_error(f"{directory}/person/bob.md", RuntimeError("write failed"))
     apply = AsyncMock(return_value=apply_result)
     monkeypatch.setattr("openviking.service.memory_compile.MemoryUpdater.apply_operations", apply)
-    runner = MemoryCompileRunner(SimpleNamespace(_ensure_initialized=lambda: viking_fs))
+    finalize = AsyncMock()
+    runner = MemoryCompileRunner(
+        SimpleNamespace(
+            _ensure_initialized=lambda: viking_fs,
+            finalize_compile_directories=finalize,
+        )
+    )
 
     await runner._run(
         task_id=task.task_id,
@@ -801,9 +803,15 @@ async def test_compile_task_apply_outcomes(
     }
     if expected_status == TaskStatus.FAILED:
         assert final.error.startswith("MEMORY_CONSOLIDATION_FAILED:")
+        finalize.assert_not_awaited()
     else:
         assert final.error is None
-    assert not tracker.has_work(task.task_id)
+        finalize.assert_awaited_once_with(directory, ctx)
+    assert not await tracker.has_work(
+        task.task_id,
+        account_id=ctx.account_id,
+        user_id=ctx.user.user_id,
+    )
     if has_operations:
         apply.assert_awaited_once()
         viking_fs._async_agfs.pathlock_release.assert_awaited_once_with(lease)
@@ -821,14 +829,7 @@ async def test_compile_task_apply_outcomes(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("memory_type", [None, "entities"])
 async def test_cancel_running_compile_interrupts_before_memory_write(monkeypatch, memory_type):
-    store = SimpleNamespace(
-        create=AsyncMock(),
-        update=AsyncMock(),
-        get=AsyncMock(return_value=None),
-        list=AsyncMock(return_value=[]),
-        delete=AsyncMock(),
-    )
-    tracker = TaskTracker(store)
+    tracker = TaskTracker(PersistentTaskStore(_FakeAgfs()))
     ctx = _ctx()
     task = await tracker.create(
         "compile",
@@ -869,7 +870,11 @@ async def test_cancel_running_compile_interrupts_before_memory_write(monkeypatch
 
     final = await tracker.get(task.task_id, account_id=ctx.account_id, user_id=ctx.user.user_id)
     assert final.status == TaskStatus.CANCELLED
-    assert not tracker.has_work(task.task_id)
+    assert not await tracker.has_work(
+        task.task_id,
+        account_id=ctx.account_id,
+        user_id=ctx.user.user_id,
+    )
     memory_write.assert_not_awaited()
 
 

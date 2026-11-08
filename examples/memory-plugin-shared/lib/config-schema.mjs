@@ -87,6 +87,9 @@ export const KNOBS = [
   // they opt into cross-peer injection with `all`. Cross-project lookups stay
   // available via the MCP search/find tools, which ignore this knob.
   { name: "recallPeerScope", type: "enum", values: ["all", "actor"], default: "actor", env: "OPENVIKING_RECALL_PEER_SCOPE", workspace: "recall.peer_scope", capability: "recall" },
+  // Sent as events_time_decay_protection ("7d", "12h"): event memories keep their score for
+  // that long and decay afterwards. Empty leaves decay off, as the server does by default.
+  { name: "recallEventsDecayProtection", type: "string", default: "", env: "OPENVIKING_RECALL_EVENTS_DECAY_PROTECTION", capability: "recall" },
   { name: "recallDedupTurns", type: "int", default: 5, min: 0, max: 20, env: "OPENVIKING_RECALL_DEDUP_TURNS", workspace: "recall.dedup_turns", capability: "recall" },
   { name: "recallMaxTokens", type: "int", default: 1600, min: 64, max: 200000, env: "OPENVIKING_RECALL_MAX_TOKENS", sendOnlyWhenConfigured: true, capability: "recall" },
   { name: "recallQueryExpansion", type: "enum", values: ["auto", "off"], default: "auto", env: "OPENVIKING_RECALL_QUERY_EXPANSION", sendOnlyWhenConfigured: true, capability: "recall" },
@@ -266,6 +269,7 @@ export const WORKSPACE_RANGES = Object.fromEntries(
  */
 export const HARNESS_KEYS = {
   claudeCode: "claude_code",
+  codebuddy: "codebuddy",
   codex: "codex",
   cursor: "cursor",
   kimicode: "kimicode",

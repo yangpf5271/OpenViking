@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
@@ -23,6 +23,7 @@ import {
   readyCheckState,
   scanDebugLog,
   unknownOvcliKeys,
+  whichCommand,
   WORKSPACE_PEER_HINT,
 } from "./lib/doctor-core.mjs";
 
@@ -79,13 +80,50 @@ test("runCommand launches npm-style .cmd shims on Windows", { skip: process.plat
   assert.equal(runCommand("ov-echo-never", [], { timeoutMs: 10000, env: { ...process.env, PATH: path } }).ok, false);
 });
 
-test("describeApiKey shows head/tail only for legacy keys", () => {
+test("whichCommand returns the first executable path without a line terminator", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ov-doctor-path-"));
+  const originalPath = process.env.PATH;
+  const command = `ov-doctor-probe-${process.pid}`;
+  const filename = process.platform === "win32" ? `${command}.exe` : command;
+  const bins = [join(dir, "first bin"), join(dir, "second bin")];
+  try {
+    for (const bin of bins) {
+      mkdirSync(bin);
+      writeFileSync(join(bin, filename), "", { mode: 0o755 });
+    }
+    for (const paths of [bins, bins.slice(0, 1)]) {
+      process.env.PATH = [...paths, originalPath].filter(Boolean).join(delimiter);
+      const resolved = whichCommand(command);
+      assert.equal(resolved, join(bins[0], filename));
+      assert.ok(existsSync(resolved));
+    }
+    assert.equal(whichCommand(`${command}-missing`), "");
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("describeApiKey decodes identity segments and masks the secret", () => {
+  const key = `${b64("acme")}.${b64("alice")}.${b64("0123456789abcdef0123456789abcdef")}`;
+  const info = describeApiKey(key);
+  assert.equal(info.format, "v2");
+  assert.equal(info.account, "acme");
+  assert.equal(info.user, "alice");
+  assert.match(info.display, /^account=acme user=alice secret=[A-Za-z0-9_-]{4}…[A-Za-z0-9_-]{4}$/);
+  assert.ok(!info.display.includes(key.split(".")[2]));
+  assert.deepEqual(info.problems, []);
+});
+
+test("describeApiKey reports unsupported key shapes", () => {
   const key = "ff6e58" + "a".repeat(54) + "f956";
   const info = describeApiKey(key);
-  assert.equal(info.format, "legacy");
-  assert.equal(info.display, "ff6e…f956 (64 chars, legacy single-segment format)");
+  assert.equal(info.format, "unsupported");
+  assert.equal(info.display, "ff6e…f956 (64 chars, unsupported format)");
+  assert.ok(info.problems.some((p) => p.includes("unsupported shape")));
   assert.equal(describeApiKey("").present, false);
-  assert.equal(describeApiKey("short").display, "***** (5 chars, legacy single-segment format)");
+  assert.equal(describeApiKey("short").display, "***** (5 chars, unsupported format)");
 });
 
 test("describeApiKey flags copy/paste damage", () => {
@@ -253,7 +291,7 @@ test("lintServerConf covers every harness, not just the two with a legacy ov.con
 });
 
 test("assessReady interprets the readiness checks", () => {
-  const ok = { ok: true, status: 200, json: { status: "ready", checks: { agfs: { status: "ok", checks: { filesystem: "ok", multiwrite_sync: "not_supported" } }, vectordb: "ok", api_key_manager: "not_configured", embedding: "ok", ollama: "not_configured" } } };
+  const ok = { ok: true, status: 200, json: { status: "ready", checks: { agfs: { status: "ok", checks: { filesystem: "ok" } }, vectordb: "ok", api_key_manager: "not_configured", embedding: "ok", ollama: "not_configured" } } };
   let report = createReport();
   assert.equal(assessReady(report, ok).ready, true);
   assert.equal(report.exitCode(), 0);

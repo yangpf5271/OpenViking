@@ -16,6 +16,7 @@ from openviking.resource.watch_manager import WatchManager
 from openviking.server.identity import RequestContext, Role
 from openviking.service import resource_service as resource_service_module
 from openviking.service.resource_service import ResourceService
+from openviking.service.task_domain import WorkSummary
 from openviking.service.task_tracker import TaskStatus
 from openviking.service.task_work_index import TASK_WORK_ID_FIELD
 from openviking.storage.content_write import ContentWriteCoordinator
@@ -284,14 +285,7 @@ class TestWatchTaskCreation:
         async def fake_set_tags(self, **kwargs):
             raise AssertionError("add_resource(tags=...) must write tags during ingest")
 
-        class FakeQueueManager:
-            async def wait_complete(self, timeout=None):
-                return {}
-
         monkeypatch.setattr(ContentWriteCoordinator, "set_tags", fake_set_tags)
-        monkeypatch.setattr(
-            resource_service_module, "get_queue_manager", lambda: FakeQueueManager()
-        )
 
         result = await resource_service.add_resource(
             path="/test/path",
@@ -334,14 +328,7 @@ class TestWatchTaskCreation:
         async def fake_set_tags(self, **kwargs):
             return {"tags_updated": True}
 
-        class FakeQueueManager:
-            async def wait_complete(self, timeout=None):
-                return {}
-
         monkeypatch.setattr(ContentWriteCoordinator, "set_tags", fake_set_tags)
-        monkeypatch.setattr(
-            resource_service_module, "get_queue_manager", lambda: FakeQueueManager()
-        )
 
         await resource_service.add_resource(
             path="/test/path",
@@ -404,9 +391,13 @@ class TestWatchTaskCreation:
         )
 
     def test_watch_persists_clear_without_tags(self, resource_service: ResourceService):
-        assert resource_service._watch_processor_kwargs({}, None, "clear") == {
-            "tag_mode": "clear"
-        }
+        assert resource_service._watch_processor_kwargs({}, None, "clear") == {"tag_mode": "clear"}
+
+    def test_watch_kwargs_strip_transient_head_sha_hint(self, resource_service: ResourceService):
+        sanitized = resource_service._sanitize_watch_processor_kwargs(
+            {"git_head_sha_hint": "a" * 40, "branch": "main"}
+        )
+        assert sanitized == {"branch": "main"}
 
     def test_add_resource_message_round_trip_preserves_clear_without_tags(self):
         message = AddResourceMsg(
@@ -693,9 +684,7 @@ class TestAddResourceArgs:
             return resolver(
                 SimpleNamespace(
                     account=SimpleNamespace(feishu=None),
-                    cluster=SimpleNamespace(
-                        feishu=FeishuConfig(domain="https://open.feishu.cn")
-                    ),
+                    cluster=SimpleNamespace(feishu=FeishuConfig(domain="https://open.feishu.cn")),
                 )
             )
 
@@ -713,9 +702,7 @@ class TestAddResourceArgs:
             seen["config_domain"] = feishu_config.domain
             return SimpleNamespace(source_name=None, source_format="file")
 
-        resource_service._runtime_config_manager = SimpleNamespace(
-            resolve_account=resolve_account
-        )
+        resource_service._runtime_config_manager = SimpleNamespace(resolve_account=resolve_account)
         monkeypatch.setattr(
             "openviking.parse.accessors.feishu_accessor.FeishuAccessor.preflight_source",
             preflight,
@@ -769,9 +756,7 @@ class TestAddResourceArgs:
                 )
             )
 
-        resource_service._runtime_config_manager = SimpleNamespace(
-            resolve_account=resolve_account
-        )
+        resource_service._runtime_config_manager = SimpleNamespace(resolve_account=resolve_account)
         disable_task_tracker(monkeypatch)
         to_uri = "viking://resources/feishu-account-watch"
         resource_service._plan_source_job_target = AsyncMock(
@@ -945,6 +930,7 @@ class TestAddResourceArgs:
                 source_name="private",
                 source_path=repo_url,
                 source_format="repository",
+                head_sha=None,
             )
         )
         resource_service._plan_source_job_target = AsyncMock(
@@ -1043,11 +1029,15 @@ async def test_add_resource_processor_records_paused_watch_result(
     task_tracker = SimpleNamespace(
         create=AsyncMock(return_value=SimpleNamespace(status=TaskStatus.PENDING)),
         start=AsyncMock(),
-        update_stage=AsyncMock(),
+        patch_task=AsyncMock(),
         complete=AsyncMock(),
         fail=AsyncMock(),
         get_task_auth=AsyncMock(return_value={}),
-        wait_for_descendants=AsyncMock(),
+        wait_for_task_work=AsyncMock(),
+        get_work_summary=AsyncMock(return_value=WorkSummary()),
+        format_queue_status=Mock(return_value={}),
+        format_queue_timing=Mock(return_value={}),
+        get=AsyncMock(return_value=SimpleNamespace(status=TaskStatus.CANCELLING)),
     )
     monkeypatch.setattr(
         "openviking.storage.queuefs.add_resource_processor.get_task_tracker",
@@ -1064,6 +1054,7 @@ async def test_add_resource_processor_records_paused_watch_result(
     service = SimpleNamespace(
         execute_add_resource_job=execute,
         _link_resource_reason_memory=AsyncMock(),
+        _initial_source_checkpoint=Mock(return_value=None),
         record_watch_execution=AsyncMock(),
     )
     processor = AddResourceProcessor(
@@ -1099,6 +1090,47 @@ async def test_add_resource_processor_records_paused_watch_result(
 
 
 @pytest.mark.asyncio
+async def test_add_resource_processor_records_checkpoint_only_after_success():
+    service = SimpleNamespace(
+        _initial_source_checkpoint=ResourceService._initial_source_checkpoint,
+        record_watch_execution=AsyncMock(),
+    )
+    processor = AddResourceProcessor(
+        service,
+        QueueManager.ADD_RESOURCE,
+        SimpleNamespace(_async_agfs=SimpleNamespace()),
+    )
+    message = AddResourceMsg(
+        task_id="add-resource-1",
+        path="https://github.com/org/repo",
+        root_uri="viking://resources/repo",
+        account_id="account-1",
+        user_id="user-1",
+        role="user",
+        watch_task_id="watch-1",
+        instruction="focus on APIs",
+    )
+
+    await processor._record_watch_execution(
+        message,
+        "completed",
+        result={"meta": {"resolved_head_sha": "a" * 40}},
+    )
+
+    service.record_watch_execution.assert_awaited_once_with(
+        "watch-1",
+        status="completed",
+        execution_task_id="add-resource-1",
+        error=None,
+        source_checkpoint={
+            "kind": "git",
+            "head_sha": "a" * 40,
+            "instruction": "focus on APIs",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_record_watch_execution_redacts_error_in_log(caplog):
     watch_manager = SimpleNamespace(record_execution=AsyncMock())
     scheduler = SimpleNamespace(
@@ -1128,6 +1160,34 @@ async def test_record_watch_execution_redacts_error_in_log(caplog):
         status="failed",
         execution_task_id="connector-1",
         error=error,
+    )
+    scheduler.release_execution.assert_awaited_once_with("watch-1")
+
+
+@pytest.mark.asyncio
+async def test_record_watch_execution_persists_checkpoint_after_completed_status():
+    watch_manager = SimpleNamespace(
+        record_execution=AsyncMock(),
+        update_source_checkpoint=AsyncMock(),
+    )
+    scheduler = SimpleNamespace(
+        watch_manager=watch_manager,
+        release_execution=AsyncMock(),
+    )
+    service = ResourceService(watch_scheduler=scheduler)
+    checkpoint = {"kind": "git", "head_sha": "a" * 40}
+
+    await service.record_watch_execution(
+        "watch-1",
+        status="completed",
+        execution_task_id="add-resource-1",
+        source_checkpoint=checkpoint,
+    )
+
+    watch_manager.record_execution.assert_awaited_once()
+    watch_manager.update_source_checkpoint.assert_awaited_once_with(
+        "watch-1",
+        checkpoint,
     )
     scheduler.release_execution.assert_awaited_once_with("watch-1")
 
@@ -1429,6 +1489,10 @@ class TestWatchTaskCancellation:
         task = await get_task_by_uri(resource_service, to_uri, request_context)
         assert task is not None
         assert task.is_active is True
+        await resource_service._watch_scheduler.watch_manager.update_source_checkpoint(
+            task.task_id,
+            {"kind": "git", "head_sha": "a" * 40, "instruction": ""},
+        )
 
         await resource_service.add_resource(
             path="/test/path",
@@ -1440,6 +1504,7 @@ class TestWatchTaskCancellation:
         task = await get_task_by_uri(resource_service, to_uri, request_context)
         assert task is not None
         assert task.is_active is False
+        assert task.source_checkpoint is None
 
     @pytest.mark.asyncio
     async def test_cancel_watch_task_with_negative_interval(
